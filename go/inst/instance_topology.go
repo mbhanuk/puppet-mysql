@@ -52,7 +52,7 @@ func getASCIITopologyEntry(depth int, instance *Instance, replicationMap map[*In
 	if instance == nil {
 		return []string{}
 	}
-	if instance.IsCoMaster && depth > 1 {
+	if instance.IsCoMain && depth > 1 {
 		return []string{}
 	}
 	prefix := ""
@@ -100,28 +100,28 @@ func ASCIITopology(clusterName string, historyTimestampPattern string, tabulated
 	}
 
 	replicationMap := make(map[*Instance]([]*Instance))
-	var masterInstance *Instance
+	var mainInstance *Instance
 	// Investigate replicas:
 	for _, instance := range instances {
-		master, ok := instancesMap[instance.MasterKey]
+		main, ok := instancesMap[instance.MainKey]
 		if ok {
-			if _, ok := replicationMap[master]; !ok {
-				replicationMap[master] = [](*Instance){}
+			if _, ok := replicationMap[main]; !ok {
+				replicationMap[main] = [](*Instance){}
 			}
-			replicationMap[master] = append(replicationMap[master], instance)
+			replicationMap[main] = append(replicationMap[main], instance)
 		} else {
-			masterInstance = instance
+			mainInstance = instance
 		}
 	}
 	// Get entries:
 	var entries []string
-	if masterInstance != nil {
-		// Single master
-		entries = getASCIITopologyEntry(0, masterInstance, replicationMap, historyTimestampPattern == "", fillerCharacter, tabulated)
+	if mainInstance != nil {
+		// Single main
+		entries = getASCIITopologyEntry(0, mainInstance, replicationMap, historyTimestampPattern == "", fillerCharacter, tabulated)
 	} else {
-		// Co-masters? For visualization we put each in its own branch while ignoring its other co-masters.
+		// Co-mains? For visualization we put each in its own branch while ignoring its other co-mains.
 		for _, instance := range instances {
-			if instance.IsCoMaster {
+			if instance.IsCoMain {
 				entries = append(entries, getASCIITopologyEntry(1, instance, replicationMap, historyTimestampPattern == "", fillerCharacter, tabulated)...)
 			}
 		}
@@ -165,14 +165,14 @@ func shouldPostponeRelocatingReplica(replica *Instance, postponedFunctionsContai
 	return false
 }
 
-// GetInstanceMaster synchronously reaches into the replication topology
-// and retrieves master's data
-func GetInstanceMaster(instance *Instance) (*Instance, error) {
-	master, err := ReadTopologyInstance(&instance.MasterKey)
-	return master, err
+// GetInstanceMain synchronously reaches into the replication topology
+// and retrieves main's data
+func GetInstanceMain(instance *Instance) (*Instance, error) {
+	main, err := ReadTopologyInstance(&instance.MainKey)
+	return main, err
 }
 
-// InstancesAreSiblings checks whether both instances are replicating from same master
+// InstancesAreSiblings checks whether both instances are replicating from same main
 func InstancesAreSiblings(instance0, instance1 *Instance) bool {
 	if !instance0.IsReplica() {
 		return false
@@ -184,23 +184,23 @@ func InstancesAreSiblings(instance0, instance1 *Instance) bool {
 		// same instance...
 		return false
 	}
-	return instance0.MasterKey.Equals(&instance1.MasterKey)
+	return instance0.MainKey.Equals(&instance1.MainKey)
 }
 
-// InstanceIsMasterOf checks whether an instance is the master of another
-func InstanceIsMasterOf(allegedMaster, allegedReplica *Instance) bool {
+// InstanceIsMainOf checks whether an instance is the main of another
+func InstanceIsMainOf(allegedMain, allegedReplica *Instance) bool {
 	if !allegedReplica.IsReplica() {
 		return false
 	}
-	if allegedMaster.Key.Equals(&allegedReplica.Key) {
+	if allegedMain.Key.Equals(&allegedReplica.Key) {
 		// same instance...
 		return false
 	}
-	return allegedMaster.Key.Equals(&allegedReplica.MasterKey)
+	return allegedMain.Key.Equals(&allegedReplica.MainKey)
 }
 
 // MoveEquivalent will attempt moving instance indicated by instanceKey below another instance,
-// based on known master coordinates equivalence
+// based on known main coordinates equivalence
 func MoveEquivalent(instanceKey, otherKey *InstanceKey) (*Instance, error) {
 	instance, found, err := ReadInstance(instanceKey)
 	if err != nil || !found {
@@ -211,23 +211,23 @@ func MoveEquivalent(instanceKey, otherKey *InstanceKey) (*Instance, error) {
 	}
 
 	// Are there equivalent coordinates to this instance?
-	instanceCoordinates := &InstanceBinlogCoordinates{Key: instance.MasterKey, Coordinates: instance.ExecBinlogCoordinates}
+	instanceCoordinates := &InstanceBinlogCoordinates{Key: instance.MainKey, Coordinates: instance.ExecBinlogCoordinates}
 	binlogCoordinates, err := GetEquivalentBinlogCoordinatesFor(instanceCoordinates, otherKey)
 	if err != nil {
 		return instance, err
 	}
 	if binlogCoordinates == nil {
-		return instance, fmt.Errorf("No equivalent coordinates found for %+v replicating from %+v at %+v", instance.Key, instance.MasterKey, instance.ExecBinlogCoordinates)
+		return instance, fmt.Errorf("No equivalent coordinates found for %+v replicating from %+v at %+v", instance.Key, instance.MainKey, instance.ExecBinlogCoordinates)
 	}
 	// For performance reasons, we did all the above before even checking the replica is stopped or stopping it at all.
 	// This allows us to quickly skip the entire operation should there NOT be coordinates.
 	// To elaborate: if the replica is actually running AND making progress, it is unlikely/impossible for it to have
 	// equivalent coordinates, as the current coordinates are like to have never been seen.
-	// This excludes the case, for example, that the master is itself not replicating.
+	// This excludes the case, for example, that the main is itself not replicating.
 	// Now if we DO get to happen on equivalent coordinates, we need to double check. For CHANGE MASTER to happen we must
 	// stop the replica anyhow. But then let's verify the position hasn't changed.
 	knownExecBinlogCoordinates := instance.ExecBinlogCoordinates
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
@@ -236,10 +236,10 @@ func MoveEquivalent(instanceKey, otherKey *InstanceKey) (*Instance, error) {
 		err = fmt.Errorf("MoveEquivalent(): ExecBinlogCoordinates changed after stopping replication on %+v; aborting", instance.Key)
 		goto Cleanup
 	}
-	instance, err = ChangeMasterTo(instanceKey, otherKey, binlogCoordinates, false, GTIDHintNeutral)
+	instance, err = ChangeMainTo(instanceKey, otherKey, binlogCoordinates, false, GTIDHintNeutral)
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 
 	if err == nil {
 		message := fmt.Sprintf("moved %+v via equivalence coordinates below %+v", *instanceKey, *otherKey)
@@ -251,7 +251,7 @@ Cleanup:
 
 // MoveUp will attempt moving instance indicated by instanceKey up the topology hierarchy.
 // It will perform all safety and sanity checks and will tamper with this instance's replication
-// as well as its master.
+// as well as its main.
 func MoveUp(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
@@ -264,21 +264,21 @@ func MoveUp(instanceKey *InstanceKey) (*Instance, error) {
 	if canMove, merr := rinstance.CanMove(); !canMove {
 		return instance, merr
 	}
-	master, err := GetInstanceMaster(instance)
+	main, err := GetInstanceMain(instance)
 	if err != nil {
-		return instance, log.Errorf("Cannot GetInstanceMaster() for %+v. error=%+v", instance.Key, err)
+		return instance, log.Errorf("Cannot GetInstanceMain() for %+v. error=%+v", instance.Key, err)
 	}
 
-	if !master.IsReplica() {
-		return instance, fmt.Errorf("master is not a replica itself: %+v", master.Key)
+	if !main.IsReplica() {
+		return instance, fmt.Errorf("main is not a replica itself: %+v", main.Key)
 	}
 
-	if canReplicate, err := instance.CanReplicateFrom(master); canReplicate == false {
+	if canReplicate, err := instance.CanReplicateFrom(main); canReplicate == false {
 		return instance, err
 	}
-	if master.IsBinlogServer() {
+	if main.IsBinlogServer() {
 		// Quick solution via binlog servers
-		return Repoint(instanceKey, &master.MasterKey, GTIDHintDeny)
+		return Repoint(instanceKey, &main.MainKey, GTIDHintDeny)
 	}
 
 	log.Infof("Will move %+v up the topology", *instanceKey)
@@ -289,48 +289,48 @@ func MoveUp(instanceKey *InstanceKey) (*Instance, error) {
 	} else {
 		defer EndMaintenance(maintenanceToken)
 	}
-	if maintenanceToken, merr := BeginMaintenance(&master.Key, GetMaintenanceOwner(), fmt.Sprintf("child %+v moves up", *instanceKey)); merr != nil {
-		err = fmt.Errorf("Cannot begin maintenance on %+v", master.Key)
+	if maintenanceToken, merr := BeginMaintenance(&main.Key, GetMaintenanceOwner(), fmt.Sprintf("child %+v moves up", *instanceKey)); merr != nil {
+		err = fmt.Errorf("Cannot begin maintenance on %+v", main.Key)
 		goto Cleanup
 	} else {
 		defer EndMaintenance(maintenanceToken)
 	}
 
 	if !instance.UsingMariaDBGTID {
-		master, err = StopSlave(&master.Key)
+		main, err = StopSubordinate(&main.Key)
 		if err != nil {
 			goto Cleanup
 		}
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
 
 	if !instance.UsingMariaDBGTID {
-		instance, err = StartSlaveUntilMasterCoordinates(instanceKey, &master.SelfBinlogCoordinates)
+		instance, err = StartSubordinateUntilMainCoordinates(instanceKey, &main.SelfBinlogCoordinates)
 		if err != nil {
 			goto Cleanup
 		}
 	}
 
-	// We can skip hostname unresolve; we just copy+paste whatever our master thinks of its master.
-	instance, err = ChangeMasterTo(instanceKey, &master.MasterKey, &master.ExecBinlogCoordinates, true, GTIDHintDeny)
+	// We can skip hostname unresolve; we just copy+paste whatever our main thinks of its main.
+	instance, err = ChangeMainTo(instanceKey, &main.MainKey, &main.ExecBinlogCoordinates, true, GTIDHintDeny)
 	if err != nil {
 		goto Cleanup
 	}
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 	if !instance.UsingMariaDBGTID {
-		master, _ = StartSlave(&master.Key)
+		main, _ = StartSubordinate(&main.Key)
 	}
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 	// and we're done (pending deferred functions)
-	AuditOperation("move-up", instanceKey, fmt.Sprintf("moved up %+v. Previous master: %+v", *instanceKey, master.Key))
+	AuditOperation("move-up", instanceKey, fmt.Sprintf("moved up %+v. Previous main: %+v", *instanceKey, main.Key))
 
 	return instance, err
 }
@@ -351,13 +351,13 @@ func MoveUpReplicas(instanceKey *InstanceKey, pattern string) ([](*Instance), *I
 	if !instance.IsReplica() {
 		return res, instance, fmt.Errorf("instance is not a replica: %+v", instanceKey), errs
 	}
-	_, err = GetInstanceMaster(instance)
+	_, err = GetInstanceMain(instance)
 	if err != nil {
-		return res, instance, log.Errorf("Cannot GetInstanceMaster() for %+v. error=%+v", instance.Key, err), errs
+		return res, instance, log.Errorf("Cannot GetInstanceMain() for %+v. error=%+v", instance.Key, err), errs
 	}
 
 	if instance.IsBinlogServer() {
-		replicas, err, errors := RepointReplicasTo(instanceKey, pattern, &instance.MasterKey)
+		replicas, err, errors := RepointReplicasTo(instanceKey, pattern, &instance.MainKey)
 		// Bail out!
 		return replicas, instance, err, errors
 	}
@@ -387,7 +387,7 @@ func MoveUpReplicas(instanceKey *InstanceKey, pattern string) ([](*Instance), *I
 		}
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
@@ -398,7 +398,7 @@ func MoveUpReplicas(instanceKey *InstanceKey, pattern string) ([](*Instance), *I
 		go func() {
 			defer func() {
 				defer func() { barrier <- &replica.Key }()
-				StartSlave(&replica.Key)
+				StartSubordinate(&replica.Key)
 			}()
 
 			var replicaErr error
@@ -416,18 +416,18 @@ func MoveUpReplicas(instanceKey *InstanceKey, pattern string) ([](*Instance), *I
 					}
 				} else {
 					// Normal case. Do the math.
-					replica, err = StopSlave(&replica.Key)
+					replica, err = StopSubordinate(&replica.Key)
 					if err != nil {
 						replicaErr = err
 						return
 					}
-					replica, err = StartSlaveUntilMasterCoordinates(&replica.Key, &instance.SelfBinlogCoordinates)
+					replica, err = StartSubordinateUntilMainCoordinates(&replica.Key, &instance.SelfBinlogCoordinates)
 					if err != nil {
 						replicaErr = err
 						return
 					}
 
-					replica, err = ChangeMasterTo(&replica.Key, &instance.MasterKey, &instance.ExecBinlogCoordinates, false, GTIDHintDeny)
+					replica, err = ChangeMainTo(&replica.Key, &instance.MainKey, &instance.ExecBinlogCoordinates, false, GTIDHintDeny)
 					if err != nil {
 						replicaErr = err
 						return
@@ -451,7 +451,7 @@ func MoveUpReplicas(instanceKey *InstanceKey, pattern string) ([](*Instance), *I
 	}
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 	if err != nil {
 		return res, instance, log.Errore(err), errs
 	}
@@ -459,7 +459,7 @@ Cleanup:
 		// All returned with error
 		return res, instance, log.Error("Error on all operations"), errs
 	}
-	AuditOperation("move-up-replicas", instanceKey, fmt.Sprintf("moved up %d/%d replicas of %+v. New master: %+v", len(res), len(replicas), *instanceKey, instance.MasterKey))
+	AuditOperation("move-up-replicas", instanceKey, fmt.Sprintf("moved up %d/%d replicas of %+v. New main: %+v", len(res), len(replicas), *instanceKey, instance.MainKey))
 
 	return res, instance, err, errs
 }
@@ -478,7 +478,7 @@ func MoveBelow(instanceKey, siblingKey *InstanceKey) (*Instance, error) {
 	}
 
 	if sibling.IsBinlogServer() {
-		// Binlog server has same coordinates as master
+		// Binlog server has same coordinates as main
 		// Easy solution!
 		return Repoint(instanceKey, &sibling.Key, GTIDHintDeny)
 	}
@@ -514,36 +514,36 @@ func MoveBelow(instanceKey, siblingKey *InstanceKey) (*Instance, error) {
 		defer EndMaintenance(maintenanceToken)
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
 
-	sibling, err = StopSlave(siblingKey)
+	sibling, err = StopSubordinate(siblingKey)
 	if err != nil {
 		goto Cleanup
 	}
 	if instance.ExecBinlogCoordinates.SmallerThan(&sibling.ExecBinlogCoordinates) {
-		instance, err = StartSlaveUntilMasterCoordinates(instanceKey, &sibling.ExecBinlogCoordinates)
+		instance, err = StartSubordinateUntilMainCoordinates(instanceKey, &sibling.ExecBinlogCoordinates)
 		if err != nil {
 			goto Cleanup
 		}
 	} else if sibling.ExecBinlogCoordinates.SmallerThan(&instance.ExecBinlogCoordinates) {
-		sibling, err = StartSlaveUntilMasterCoordinates(siblingKey, &instance.ExecBinlogCoordinates)
+		sibling, err = StartSubordinateUntilMainCoordinates(siblingKey, &instance.ExecBinlogCoordinates)
 		if err != nil {
 			goto Cleanup
 		}
 	}
 	// At this point both siblings have executed exact same statements and are identical
 
-	instance, err = ChangeMasterTo(instanceKey, &sibling.Key, &sibling.SelfBinlogCoordinates, false, GTIDHintDeny)
+	instance, err = ChangeMainTo(instanceKey, &sibling.Key, &sibling.SelfBinlogCoordinates, false, GTIDHintDeny)
 	if err != nil {
 		goto Cleanup
 	}
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
-	sibling, _ = StartSlave(siblingKey)
+	instance, _ = StartSubordinate(instanceKey)
+	sibling, _ = StartSubordinate(siblingKey)
 
 	if err != nil {
 		return instance, log.Errore(err)
@@ -554,8 +554,8 @@ Cleanup:
 	return instance, err
 }
 
-func canReplicateAssumingOracleGTID(instance, masterInstance *Instance) (canReplicate bool, err error) {
-	subtract, err := GTIDSubtract(&instance.Key, masterInstance.GtidPurged, instance.ExecutedGtidSet)
+func canReplicateAssumingOracleGTID(instance, mainInstance *Instance) (canReplicate bool, err error) {
+	subtract, err := GTIDSubtract(&instance.Key, mainInstance.GtidPurged, instance.ExecutedGtidSet)
 	if err != nil {
 		return false, err
 	}
@@ -617,17 +617,17 @@ func moveInstanceBelowViaGTID(instance, otherInstance *Instance) (*Instance, err
 		defer EndMaintenance(maintenanceToken)
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
 
-	instance, err = ChangeMasterTo(instanceKey, &otherInstance.Key, &otherInstance.SelfBinlogCoordinates, false, GTIDHintForce)
+	instance, err = ChangeMainTo(instanceKey, &otherInstance.Key, &otherInstance.SelfBinlogCoordinates, false, GTIDHintForce)
 	if err != nil {
 		goto Cleanup
 	}
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
@@ -715,8 +715,8 @@ func moveReplicasViaGTID(replicas [](*Instance), other *Instance, postponedFunct
 	return movedReplicas, unmovedReplicas, err, errs
 }
 
-// MoveReplicasGTID will (attempt to) move all replicas of given master below given instance.
-func MoveReplicasGTID(masterKey *InstanceKey, belowKey *InstanceKey, pattern string) (movedReplicas [](*Instance), unmovedReplicas [](*Instance), err error, errs []error) {
+// MoveReplicasGTID will (attempt to) move all replicas of given main below given instance.
+func MoveReplicasGTID(mainKey *InstanceKey, belowKey *InstanceKey, pattern string) (movedReplicas [](*Instance), unmovedReplicas [](*Instance), err error, errs []error) {
 	belowInstance, err := ReadTopologyInstance(belowKey)
 	if err != nil {
 		// Can't access "below" ==> can't move replicas beneath it
@@ -724,7 +724,7 @@ func MoveReplicasGTID(masterKey *InstanceKey, belowKey *InstanceKey, pattern str
 	}
 
 	// replicas involved
-	replicas, err := ReadReplicaInstancesIncludingBinlogServerSubReplicas(masterKey)
+	replicas, err := ReadReplicaInstancesIncludingBinlogServerSubReplicas(mainKey)
 	if err != nil {
 		return movedReplicas, unmovedReplicas, err, errs
 	}
@@ -735,18 +735,18 @@ func MoveReplicasGTID(masterKey *InstanceKey, belowKey *InstanceKey, pattern str
 	}
 
 	if len(unmovedReplicas) > 0 {
-		err = fmt.Errorf("MoveReplicasGTID: only moved %d out of %d replicas of %+v; error is: %+v", len(movedReplicas), len(replicas), *masterKey, err)
+		err = fmt.Errorf("MoveReplicasGTID: only moved %d out of %d replicas of %+v; error is: %+v", len(movedReplicas), len(replicas), *mainKey, err)
 	}
 
 	return movedReplicas, unmovedReplicas, err, errs
 }
 
-// Repoint connects a replica to a master using its exact same executing coordinates.
-// The given masterKey can be null, in which case the existing master is used.
+// Repoint connects a replica to a main using its exact same executing coordinates.
+// The given mainKey can be null, in which case the existing main is used.
 // Two use cases:
-// - masterKey is nil: use case is corrupted relay logs on replica
-// - masterKey is not nil: using Binlog servers (coordinates remain the same)
-func Repoint(instanceKey *InstanceKey, masterKey *InstanceKey, gtidHint OperationGTIDHint) (*Instance, error) {
+// - mainKey is nil: use case is corrupted relay logs on replica
+// - mainKey is not nil: using Binlog servers (coordinates remain the same)
+func Repoint(instanceKey *InstanceKey, mainKey *InstanceKey, gtidHint OperationGTIDHint) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
@@ -755,33 +755,33 @@ func Repoint(instanceKey *InstanceKey, masterKey *InstanceKey, gtidHint Operatio
 		return instance, fmt.Errorf("instance is not a replica: %+v", *instanceKey)
 	}
 
-	if masterKey == nil {
-		masterKey = &instance.MasterKey
+	if mainKey == nil {
+		mainKey = &instance.MainKey
 	}
-	// With repoint we *prefer* the master to be alive, but we don't strictly require it.
-	// The use case for the master being alive is with hostname-resolve or hostname-unresolve: asking the replica
-	// to reconnect to its same master while changing the MASTER_HOST in CHANGE MASTER TO due to DNS changes etc.
-	master, err := ReadTopologyInstance(masterKey)
-	masterIsAccessible := (err == nil)
-	if !masterIsAccessible {
-		master, _, err = ReadInstance(masterKey)
+	// With repoint we *prefer* the main to be alive, but we don't strictly require it.
+	// The use case for the main being alive is with hostname-resolve or hostname-unresolve: asking the replica
+	// to reconnect to its same main while changing the MASTER_HOST in CHANGE MASTER TO due to DNS changes etc.
+	main, err := ReadTopologyInstance(mainKey)
+	mainIsAccessible := (err == nil)
+	if !mainIsAccessible {
+		main, _, err = ReadInstance(mainKey)
 		if err != nil {
 			return instance, err
 		}
 	}
-	if canReplicate, err := instance.CanReplicateFrom(master); !canReplicate {
+	if canReplicate, err := instance.CanReplicateFrom(main); !canReplicate {
 		return instance, err
 	}
 
 	// if a binlog server check it is sufficiently up to date
-	if master.IsBinlogServer() {
+	if main.IsBinlogServer() {
 		// "Repoint" operation trusts the user. But only so much. Repoiting to a binlog server which is not yet there is strictly wrong.
-		if !instance.ExecBinlogCoordinates.SmallerThanOrEquals(&master.SelfBinlogCoordinates) {
-			return instance, fmt.Errorf("repoint: binlog server %+v is not sufficiently up to date to repoint %+v below it", *masterKey, *instanceKey)
+		if !instance.ExecBinlogCoordinates.SmallerThanOrEquals(&main.SelfBinlogCoordinates) {
+			return instance, fmt.Errorf("repoint: binlog server %+v is not sufficiently up to date to repoint %+v below it", *mainKey, *instanceKey)
 		}
 	}
 
-	log.Infof("Will repoint %+v to master %+v", *instanceKey, *masterKey)
+	log.Infof("Will repoint %+v to main %+v", *instanceKey, *mainKey)
 
 	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), "repoint"); merr != nil {
 		err = fmt.Errorf("Cannot begin maintenance on %+v", *instanceKey)
@@ -790,35 +790,35 @@ func Repoint(instanceKey *InstanceKey, masterKey *InstanceKey, gtidHint Operatio
 		defer EndMaintenance(maintenanceToken)
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
 
-	// See above, we are relaxed about the master being accessible/inaccessible.
+	// See above, we are relaxed about the main being accessible/inaccessible.
 	// If accessible, we wish to do hostname-unresolve. If inaccessible, we can skip the test and not fail the
-	// ChangeMasterTo operation. This is why we pass "!masterIsAccessible" below.
+	// ChangeMainTo operation. This is why we pass "!mainIsAccessible" below.
 	if instance.ExecBinlogCoordinates.IsEmpty() {
 		instance.ExecBinlogCoordinates.LogFile = "orchestrator-unknown-log-file"
 	}
-	instance, err = ChangeMasterTo(instanceKey, masterKey, &instance.ExecBinlogCoordinates, !masterIsAccessible, gtidHint)
+	instance, err = ChangeMainTo(instanceKey, mainKey, &instance.ExecBinlogCoordinates, !mainIsAccessible, gtidHint)
 	if err != nil {
 		goto Cleanup
 	}
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 	// and we're done (pending deferred functions)
-	AuditOperation("repoint", instanceKey, fmt.Sprintf("replica %+v repointed to master: %+v", *instanceKey, *masterKey))
+	AuditOperation("repoint", instanceKey, fmt.Sprintf("replica %+v repointed to main: %+v", *instanceKey, *mainKey))
 
 	return instance, err
 
 }
 
-// RepointTo repoints list of replicas onto another master.
+// RepointTo repoints list of replicas onto another main.
 // Binlog Server is the major use case
 func RepointTo(replicas [](*Instance), belowKey *InstanceKey) ([](*Instance), error, []error) {
 	res := [](*Instance){}
@@ -871,7 +871,7 @@ func RepointTo(replicas [](*Instance), belowKey *InstanceKey) ([](*Instance), er
 	return res, nil, errs
 }
 
-// RepointReplicasTo repoints replicas of a given instance (possibly filtered) onto another master.
+// RepointReplicasTo repoints replicas of a given instance (possibly filtered) onto another main.
 // Binlog Server is the major use case
 func RepointReplicasTo(instanceKey *InstanceKey, pattern string, belowKey *InstanceKey) ([](*Instance), error, []error) {
 	res := [](*Instance){}
@@ -888,21 +888,21 @@ func RepointReplicasTo(instanceKey *InstanceKey, pattern string, belowKey *Insta
 		return res, nil, errs
 	}
 	if belowKey == nil {
-		// Default to existing master. All replicas are of the same master, hence just pick one.
-		belowKey = &replicas[0].MasterKey
+		// Default to existing main. All replicas are of the same main, hence just pick one.
+		belowKey = &replicas[0].MainKey
 	}
 	log.Infof("Will repoint replicas of %+v to %+v", *instanceKey, *belowKey)
 	return RepointTo(replicas, belowKey)
 }
 
-// RepointReplicas repoints all replicas of a given instance onto its existing master.
+// RepointReplicas repoints all replicas of a given instance onto its existing main.
 func RepointReplicas(instanceKey *InstanceKey, pattern string) ([](*Instance), error, []error) {
 	return RepointReplicasTo(instanceKey, pattern, nil)
 }
 
-// MakeCoMaster will attempt to make an instance co-master with its master, by making its master a replica of its own.
-// This only works out if the master is not replicating; the master does not have a known master (it may have an unknown master).
-func MakeCoMaster(instanceKey *InstanceKey) (*Instance, error) {
+// MakeCoMain will attempt to make an instance co-main with its main, by making its main a replica of its own.
+// This only works out if the main is not replicating; the main does not have a known main (it may have an unknown main).
+func MakeCoMain(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
@@ -910,73 +910,73 @@ func MakeCoMaster(instanceKey *InstanceKey) (*Instance, error) {
 	if canMove, merr := instance.CanMove(); !canMove {
 		return instance, merr
 	}
-	master, err := GetInstanceMaster(instance)
+	main, err := GetInstanceMain(instance)
 	if err != nil {
 		return instance, err
 	}
-	log.Debugf("Will check whether %+v's master (%+v) can become its co-master", instance.Key, master.Key)
-	if canMove, merr := master.CanMoveAsCoMaster(); !canMove {
+	log.Debugf("Will check whether %+v's main (%+v) can become its co-main", instance.Key, main.Key)
+	if canMove, merr := main.CanMoveAsCoMain(); !canMove {
 		return instance, merr
 	}
-	if instanceKey.Equals(&master.MasterKey) {
-		return instance, fmt.Errorf("instance %+v is already co master of %+v", instance.Key, master.Key)
+	if instanceKey.Equals(&main.MainKey) {
+		return instance, fmt.Errorf("instance %+v is already co main of %+v", instance.Key, main.Key)
 	}
 	if !instance.ReadOnly {
-		return instance, fmt.Errorf("instance %+v is not read-only; first make it read-only before making it co-master", instance.Key)
+		return instance, fmt.Errorf("instance %+v is not read-only; first make it read-only before making it co-main", instance.Key)
 	}
-	if master.IsCoMaster {
-		// We allow breaking of an existing co-master replication. Here's the breakdown:
-		// Ideally, this would not eb allowed, and we would first require the user to RESET SLAVE on 'master'
-		// prior to making it participate as co-master with our 'instance'.
+	if main.IsCoMain {
+		// We allow breaking of an existing co-main replication. Here's the breakdown:
+		// Ideally, this would not eb allowed, and we would first require the user to RESET SLAVE on 'main'
+		// prior to making it participate as co-main with our 'instance'.
 		// However there's the problem that upon RESET SLAVE we lose the replication's user/password info.
 		// Thus, we come up with the following rule:
-		// If S replicates from M1, and M1<->M2 are co masters, we allow S to become co-master of M1 (S<->M1) if:
+		// If S replicates from M1, and M1<->M2 are co mains, we allow S to become co-main of M1 (S<->M1) if:
 		// - M1 is writeable
 		// - M2 is read-only or is unreachable/invalid
 		// - S  is read-only
-		// And so we will be replacing one read-only co-master with another.
-		otherCoMaster, found, _ := ReadInstance(&master.MasterKey)
-		if found && otherCoMaster.IsLastCheckValid && !otherCoMaster.ReadOnly {
-			return instance, fmt.Errorf("master %+v is already co-master with %+v, and %+v is alive, and not read-only; cowardly refusing to demote it. Please set it as read-only beforehand", master.Key, otherCoMaster.Key, otherCoMaster.Key)
+		// And so we will be replacing one read-only co-main with another.
+		otherCoMain, found, _ := ReadInstance(&main.MainKey)
+		if found && otherCoMain.IsLastCheckValid && !otherCoMain.ReadOnly {
+			return instance, fmt.Errorf("main %+v is already co-main with %+v, and %+v is alive, and not read-only; cowardly refusing to demote it. Please set it as read-only beforehand", main.Key, otherCoMain.Key, otherCoMain.Key)
 		}
 		// OK, good to go.
-	} else if _, found, _ := ReadInstance(&master.MasterKey); found {
-		return instance, fmt.Errorf("%+v is not a real master; it replicates from: %+v", master.Key, master.MasterKey)
+	} else if _, found, _ := ReadInstance(&main.MainKey); found {
+		return instance, fmt.Errorf("%+v is not a real main; it replicates from: %+v", main.Key, main.MainKey)
 	}
-	if canReplicate, err := master.CanReplicateFrom(instance); !canReplicate {
+	if canReplicate, err := main.CanReplicateFrom(instance); !canReplicate {
 		return instance, err
 	}
-	log.Infof("Will make %+v co-master of %+v", instanceKey, master.Key)
+	log.Infof("Will make %+v co-main of %+v", instanceKey, main.Key)
 
 	var gitHint OperationGTIDHint = GTIDHintNeutral
-	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), fmt.Sprintf("make co-master of %+v", master.Key)); merr != nil {
+	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), fmt.Sprintf("make co-main of %+v", main.Key)); merr != nil {
 		err = fmt.Errorf("Cannot begin maintenance on %+v", *instanceKey)
 		goto Cleanup
 	} else {
 		defer EndMaintenance(maintenanceToken)
 	}
-	if maintenanceToken, merr := BeginMaintenance(&master.Key, GetMaintenanceOwner(), fmt.Sprintf("%+v turns into co-master of this", *instanceKey)); merr != nil {
-		err = fmt.Errorf("Cannot begin maintenance on %+v", master.Key)
+	if maintenanceToken, merr := BeginMaintenance(&main.Key, GetMaintenanceOwner(), fmt.Sprintf("%+v turns into co-main of this", *instanceKey)); merr != nil {
+		err = fmt.Errorf("Cannot begin maintenance on %+v", main.Key)
 		goto Cleanup
 	} else {
 		defer EndMaintenance(maintenanceToken)
 	}
 
-	// the coMaster used to be merely a replica. Just point master into *some* position
-	// within coMaster...
-	if master.IsReplica() {
-		// this is the case of a co-master. For masters, the StopSlave operation throws an error, and
+	// the coMain used to be merely a replica. Just point main into *some* position
+	// within coMain...
+	if main.IsReplica() {
+		// this is the case of a co-main. For mains, the StopSubordinate operation throws an error, and
 		// there's really no point in doing it.
-		master, err = StopSlave(&master.Key)
+		main, err = StopSubordinate(&main.Key)
 		if err != nil {
 			goto Cleanup
 		}
 	}
-	if !master.HasReplicationCredentials {
+	if !main.HasReplicationCredentials {
 		// Let's try , if possible, to get credentials from replica. Best effort.
 		if replicationUser, replicationPassword, credentialsErr := ReadReplicationCredentials(&instance.Key); credentialsErr == nil {
 			log.Debugf("Got credentials from a replica. will now apply")
-			_, err = ChangeMasterCredentials(&master.Key, replicationUser, replicationPassword)
+			_, err = ChangeMainCredentials(&main.Key, replicationUser, replicationPassword)
 			if err != nil {
 				goto Cleanup
 			}
@@ -985,7 +985,7 @@ func MakeCoMaster(instanceKey *InstanceKey) (*Instance, error) {
 
 	if instance.AllowTLS {
 		log.Debugf("Enabling SSL replication")
-		_, err = EnableMasterSSL(&master.Key)
+		_, err = EnableMainSSL(&main.Key)
 		if err != nil {
 			goto Cleanup
 		}
@@ -994,24 +994,24 @@ func MakeCoMaster(instanceKey *InstanceKey) (*Instance, error) {
 	if instance.UsingOracleGTID {
 		gitHint = GTIDHintForce
 	}
-	master, err = ChangeMasterTo(&master.Key, instanceKey, &instance.SelfBinlogCoordinates, false, gitHint)
+	main, err = ChangeMainTo(&main.Key, instanceKey, &instance.SelfBinlogCoordinates, false, gitHint)
 	if err != nil {
 		goto Cleanup
 	}
 
 Cleanup:
-	master, _ = StartSlave(&master.Key)
+	main, _ = StartSubordinate(&main.Key)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 	// and we're done (pending deferred functions)
-	AuditOperation("make-co-master", instanceKey, fmt.Sprintf("%+v made co-master of %+v", *instanceKey, master.Key))
+	AuditOperation("make-co-main", instanceKey, fmt.Sprintf("%+v made co-main of %+v", *instanceKey, main.Key))
 
 	return instance, err
 }
 
-// ResetSlaveOperation will reset a replica
-func ResetSlaveOperation(instanceKey *InstanceKey) (*Instance, error) {
+// ResetSubordinateOperation will reset a replica
+func ResetSubordinateOperation(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
@@ -1027,32 +1027,32 @@ func ResetSlaveOperation(instanceKey *InstanceKey) (*Instance, error) {
 	}
 
 	if instance.IsReplica() {
-		instance, err = StopSlave(instanceKey)
+		instance, err = StopSubordinate(instanceKey)
 		if err != nil {
 			goto Cleanup
 		}
 	}
 
-	instance, err = ResetSlave(instanceKey)
+	instance, err = ResetSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
 	// and we're done (pending deferred functions)
-	AuditOperation("reset-slave", instanceKey, fmt.Sprintf("%+v replication reset", *instanceKey))
+	AuditOperation("reset-subordinate", instanceKey, fmt.Sprintf("%+v replication reset", *instanceKey))
 
 	return instance, err
 }
 
-// DetachReplicaMasterHost detaches a replica from its master by corrupting the Master_Host (in such way that is reversible)
-func DetachReplicaMasterHost(instanceKey *InstanceKey) (*Instance, error) {
+// DetachReplicaMainHost detaches a replica from its main by corrupting the Main_Host (in such way that is reversible)
+func DetachReplicaMainHost(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
@@ -1060,43 +1060,43 @@ func DetachReplicaMasterHost(instanceKey *InstanceKey) (*Instance, error) {
 	if !instance.IsReplica() {
 		return instance, fmt.Errorf("instance is not a replica: %+v", *instanceKey)
 	}
-	if instance.MasterKey.IsDetached() {
+	if instance.MainKey.IsDetached() {
 		return instance, fmt.Errorf("instance already detached: %+v", *instanceKey)
 	}
-	detachedMasterKey := instance.MasterKey.DetachedKey()
+	detachedMainKey := instance.MainKey.DetachedKey()
 
-	log.Infof("Will detach master host on %+v. Detached key is %+v", *instanceKey, *detachedMasterKey)
+	log.Infof("Will detach main host on %+v. Detached key is %+v", *instanceKey, *detachedMainKey)
 
-	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), "detach-replica-master-host"); merr != nil {
+	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), "detach-replica-main-host"); merr != nil {
 		err = fmt.Errorf("Cannot begin maintenance on %+v", *instanceKey)
 		goto Cleanup
 	} else {
 		defer EndMaintenance(maintenanceToken)
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
 
-	instance, err = ChangeMasterTo(instanceKey, detachedMasterKey, &instance.ExecBinlogCoordinates, true, GTIDHintNeutral)
+	instance, err = ChangeMainTo(instanceKey, detachedMainKey, &instance.ExecBinlogCoordinates, true, GTIDHintNeutral)
 	if err != nil {
 		goto Cleanup
 	}
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 	// and we're done (pending deferred functions)
-	AuditOperation("repoint", instanceKey, fmt.Sprintf("replica %+v detached from master into %+v", *instanceKey, *detachedMasterKey))
+	AuditOperation("repoint", instanceKey, fmt.Sprintf("replica %+v detached from main into %+v", *instanceKey, *detachedMainKey))
 
 	return instance, err
 }
 
-// ReattachReplicaMasterHost reattaches a replica back onto its master by undoing a DetachReplicaMasterHost operation
-func ReattachReplicaMasterHost(instanceKey *InstanceKey) (*Instance, error) {
+// ReattachReplicaMainHost reattaches a replica back onto its main by undoing a DetachReplicaMainHost operation
+func ReattachReplicaMainHost(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
@@ -1104,40 +1104,40 @@ func ReattachReplicaMasterHost(instanceKey *InstanceKey) (*Instance, error) {
 	if !instance.IsReplica() {
 		return instance, fmt.Errorf("instance is not a replica: %+v", *instanceKey)
 	}
-	if !instance.MasterKey.IsDetached() {
+	if !instance.MainKey.IsDetached() {
 		return instance, fmt.Errorf("instance does not seem to be detached: %+v", *instanceKey)
 	}
 
-	reattachedMasterKey := instance.MasterKey.ReattachedKey()
+	reattachedMainKey := instance.MainKey.ReattachedKey()
 
-	log.Infof("Will reattach master host on %+v. Reattached key is %+v", *instanceKey, *reattachedMasterKey)
+	log.Infof("Will reattach main host on %+v. Reattached key is %+v", *instanceKey, *reattachedMainKey)
 
-	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), "reattach-replica-master-host"); merr != nil {
+	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), "reattach-replica-main-host"); merr != nil {
 		err = fmt.Errorf("Cannot begin maintenance on %+v", *instanceKey)
 		goto Cleanup
 	} else {
 		defer EndMaintenance(maintenanceToken)
 	}
 
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
 
-	instance, err = ChangeMasterTo(instanceKey, reattachedMasterKey, &instance.ExecBinlogCoordinates, true, GTIDHintNeutral)
+	instance, err = ChangeMainTo(instanceKey, reattachedMainKey, &instance.ExecBinlogCoordinates, true, GTIDHintNeutral)
 	if err != nil {
 		goto Cleanup
 	}
-	// Just in case this instance used to be a master:
-	ReplaceAliasClusterName(instanceKey.StringCode(), reattachedMasterKey.StringCode())
+	// Just in case this instance used to be a main:
+	ReplaceAliasClusterName(instanceKey.StringCode(), reattachedMainKey.StringCode())
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 	// and we're done (pending deferred functions)
-	AuditOperation("repoint", instanceKey, fmt.Sprintf("replica %+v reattached to master %+v", *instanceKey, *reattachedMasterKey))
+	AuditOperation("repoint", instanceKey, fmt.Sprintf("replica %+v reattached to main %+v", *instanceKey, *reattachedMainKey))
 
 	return instance, err
 }
@@ -1192,32 +1192,32 @@ func DisableGTID(instanceKey *InstanceKey) (*Instance, error) {
 	return instance, err
 }
 
-// ErrantGTIDResetMaster will issue a safe RESET MASTER on a replica that replicates via GTID:
+// ErrantGTIDResetMain will issue a safe RESET MASTER on a replica that replicates via GTID:
 // It will make sure the gtid_purged set matches the executed set value as read just before the RESET.
 // this will enable new replicas to be attached to given instance without complaints about missing/purged entries.
 // This function requires that the instance does not have replicas.
-func ErrantGTIDResetMaster(instanceKey *InstanceKey) (instance *Instance, err error) {
+func ErrantGTIDResetMain(instanceKey *InstanceKey) (instance *Instance, err error) {
 	instance, err = ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
 	}
 	if instance.GtidErrant == "" {
-		return instance, log.Errorf("gtid-errant-reset-master will not operate on %+v because no errant GTID is found", *instanceKey)
+		return instance, log.Errorf("gtid-errant-reset-main will not operate on %+v because no errant GTID is found", *instanceKey)
 	}
 	if !instance.SupportsOracleGTID {
-		return instance, log.Errorf("gtid-errant-reset-master requested for %+v but it is not using oracle-gtid", *instanceKey)
+		return instance, log.Errorf("gtid-errant-reset-main requested for %+v but it is not using oracle-gtid", *instanceKey)
 	}
-	if len(instance.SlaveHosts) > 0 {
-		return instance, log.Errorf("gtid-errant-reset-master will not operate on %+v because it has %+v replicas. Expecting no replicas", *instanceKey, len(instance.SlaveHosts))
+	if len(instance.SubordinateHosts) > 0 {
+		return instance, log.Errorf("gtid-errant-reset-main will not operate on %+v because it has %+v replicas. Expecting no replicas", *instanceKey, len(instance.SubordinateHosts))
 	}
 
 	gtidSubtract := ""
 	executedGtidSet := ""
-	masterStatusFound := false
+	mainStatusFound := false
 	replicationStopped := false
 	waitInterval := time.Second * 5
 
-	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), "reset-master-gtid"); merr != nil {
+	if maintenanceToken, merr := BeginMaintenance(instanceKey, GetMaintenanceOwner(), "reset-main-gtid"); merr != nil {
 		err = fmt.Errorf("Cannot begin maintenance on %+v", *instanceKey)
 		goto Cleanup
 	} else {
@@ -1225,7 +1225,7 @@ func ErrantGTIDResetMaster(instanceKey *InstanceKey) (instance *Instance, err er
 	}
 
 	if instance.IsReplica() {
-		instance, err = StopSlave(instanceKey)
+		instance, err = StopSubordinate(instanceKey)
 		if err != nil {
 			goto Cleanup
 		}
@@ -1234,7 +1234,7 @@ func ErrantGTIDResetMaster(instanceKey *InstanceKey) (instance *Instance, err er
 			goto Cleanup
 		}
 		if !replicationStopped {
-			err = fmt.Errorf("gtid-errant-reset-master: timeout while waiting for replication to stop on %+v", instance.Key)
+			err = fmt.Errorf("gtid-errant-reset-main: timeout while waiting for replication to stop on %+v", instance.Key)
 			goto Cleanup
 		}
 	}
@@ -1248,28 +1248,28 @@ func ErrantGTIDResetMaster(instanceKey *InstanceKey) (instance *Instance, err er
 	// The replica will be left in a broken state.
 	// This is why we allow multiple attempts at the following:
 	for i := 0; i < countRetries; i++ {
-		instance, err = ResetMaster(instanceKey)
+		instance, err = ResetMain(instanceKey)
 		if err == nil {
 			break
 		}
 		time.Sleep(waitInterval)
 	}
 	if err != nil {
-		err = fmt.Errorf("gtid-errant-reset-master: error while resetting master on %+v, after which intended to set gtid_purged to: %s. Error was: %+v", instance.Key, gtidSubtract, err)
+		err = fmt.Errorf("gtid-errant-reset-main: error while resetting main on %+v, after which intended to set gtid_purged to: %s. Error was: %+v", instance.Key, gtidSubtract, err)
 		goto Cleanup
 	}
 
-	masterStatusFound, executedGtidSet, err = ShowMasterStatus(instanceKey)
+	mainStatusFound, executedGtidSet, err = ShowMainStatus(instanceKey)
 	if err != nil {
-		err = fmt.Errorf("gtid-errant-reset-master: error getting master status on %+v, after which intended to set gtid_purged to: %s. Error was: %+v", instance.Key, gtidSubtract, err)
+		err = fmt.Errorf("gtid-errant-reset-main: error getting main status on %+v, after which intended to set gtid_purged to: %s. Error was: %+v", instance.Key, gtidSubtract, err)
 		goto Cleanup
 	}
-	if !masterStatusFound {
-		err = fmt.Errorf("gtid-errant-reset-master: cannot get master status on %+v, after which intended to set gtid_purged to: %s.", instance.Key, gtidSubtract)
+	if !mainStatusFound {
+		err = fmt.Errorf("gtid-errant-reset-main: cannot get main status on %+v, after which intended to set gtid_purged to: %s.", instance.Key, gtidSubtract)
 		goto Cleanup
 	}
 	if executedGtidSet != "" {
-		err = fmt.Errorf("gtid-errant-reset-master: Unexpected non-empty Executed_Gtid_Set found on %+v following RESET MASTER, after which intended to set gtid_purged to: %s. Executed_Gtid_Set found to be: %+v", instance.Key, gtidSubtract, executedGtidSet)
+		err = fmt.Errorf("gtid-errant-reset-main: Unexpected non-empty Executed_Gtid_Set found on %+v following RESET MASTER, after which intended to set gtid_purged to: %s. Executed_Gtid_Set found to be: %+v", instance.Key, gtidSubtract, executedGtidSet)
 		goto Cleanup
 	}
 
@@ -1282,69 +1282,69 @@ func ErrantGTIDResetMaster(instanceKey *InstanceKey) (instance *Instance, err er
 		time.Sleep(waitInterval)
 	}
 	if err != nil {
-		err = fmt.Errorf("gtid-errant-reset-master: error setting gtid_purged on %+v to: %s. Error was: %+v", instance.Key, gtidSubtract, err)
+		err = fmt.Errorf("gtid-errant-reset-main: error setting gtid_purged on %+v to: %s. Error was: %+v", instance.Key, gtidSubtract, err)
 		goto Cleanup
 	}
 
 Cleanup:
-	var startSlaveErr error
-	instance, startSlaveErr = StartSlave(instanceKey)
-	log.Errore(startSlaveErr)
+	var startSubordinateErr error
+	instance, startSubordinateErr = StartSubordinate(instanceKey)
+	log.Errore(startSubordinateErr)
 
 	if err != nil {
 		return instance, log.Errore(err)
 	}
 
 	// and we're done (pending deferred functions)
-	AuditOperation("gtid-errant-reset-master", instanceKey, fmt.Sprintf("%+v master reset", *instanceKey))
+	AuditOperation("gtid-errant-reset-main", instanceKey, fmt.Sprintf("%+v main reset", *instanceKey))
 
 	return instance, err
 }
 
-// ErrantGTIDInjectEmpty will inject an empty transaction on the master of an instance's cluster in order to get rid
+// ErrantGTIDInjectEmpty will inject an empty transaction on the main of an instance's cluster in order to get rid
 // of an errant transaction observed on the instance.
-func ErrantGTIDInjectEmpty(instanceKey *InstanceKey) (instance *Instance, clusterMaster *Instance, countInjectedTransactions int64, err error) {
+func ErrantGTIDInjectEmpty(instanceKey *InstanceKey) (instance *Instance, clusterMain *Instance, countInjectedTransactions int64, err error) {
 	instance, err = ReadTopologyInstance(instanceKey)
 	if err != nil {
-		return instance, clusterMaster, countInjectedTransactions, err
+		return instance, clusterMain, countInjectedTransactions, err
 	}
 	if instance.GtidErrant == "" {
-		return instance, clusterMaster, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty will not operate on %+v because no errant GTID is found", *instanceKey)
+		return instance, clusterMain, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty will not operate on %+v because no errant GTID is found", *instanceKey)
 	}
 	if !instance.SupportsOracleGTID {
-		return instance, clusterMaster, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty requested for %+v but it does not support oracle-gtid", *instanceKey)
+		return instance, clusterMain, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty requested for %+v but it does not support oracle-gtid", *instanceKey)
 	}
 
-	masters, err := ReadClusterWriteableMaster(instance.ClusterName)
+	mains, err := ReadClusterWriteableMain(instance.ClusterName)
 	if err != nil {
-		return instance, clusterMaster, countInjectedTransactions, err
+		return instance, clusterMain, countInjectedTransactions, err
 	}
-	if len(masters) == 0 {
-		return instance, clusterMaster, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty found no writabel master for %+v cluster", instance.ClusterName)
+	if len(mains) == 0 {
+		return instance, clusterMain, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty found no writabel main for %+v cluster", instance.ClusterName)
 	}
-	clusterMaster = masters[0]
+	clusterMain = mains[0]
 
-	if !clusterMaster.SupportsOracleGTID {
-		return instance, clusterMaster, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty requested for %+v but the cluster's master %+v does not support oracle-gtid", *instanceKey, clusterMaster.Key)
+	if !clusterMain.SupportsOracleGTID {
+		return instance, clusterMain, countInjectedTransactions, log.Errorf("gtid-errant-inject-empty requested for %+v but the cluster's main %+v does not support oracle-gtid", *instanceKey, clusterMain.Key)
 	}
 
 	gtidSet, err := NewOracleGtidSet(instance.GtidErrant)
 	if err != nil {
-		return instance, clusterMaster, countInjectedTransactions, err
+		return instance, clusterMain, countInjectedTransactions, err
 	}
 	explodedEntries := gtidSet.Explode()
-	log.Infof("gtid-errant-inject-empty: about to inject %+v empty transactions %+v on cluster master %+v", len(explodedEntries), gtidSet.String(), clusterMaster.Key)
+	log.Infof("gtid-errant-inject-empty: about to inject %+v empty transactions %+v on cluster main %+v", len(explodedEntries), gtidSet.String(), clusterMain.Key)
 	for _, entry := range explodedEntries {
-		if err := injectEmptyGTIDTransaction(&clusterMaster.Key, entry); err != nil {
-			return instance, clusterMaster, countInjectedTransactions, err
+		if err := injectEmptyGTIDTransaction(&clusterMain.Key, entry); err != nil {
+			return instance, clusterMain, countInjectedTransactions, err
 		}
 		countInjectedTransactions++
 	}
 
 	// and we're done (pending deferred functions)
-	AuditOperation("gtid-errant-inject-empty", instanceKey, fmt.Sprintf("injected %+v empty transactions on %+v", countInjectedTransactions, clusterMaster.Key))
+	AuditOperation("gtid-errant-inject-empty", instanceKey, fmt.Sprintf("injected %+v empty transactions on %+v", countInjectedTransactions, clusterMain.Key))
 
-	return instance, clusterMaster, countInjectedTransactions, err
+	return instance, clusterMain, countInjectedTransactions, err
 }
 
 // FindLastPseudoGTIDEntry will search an instance's binary logs or relay logs for the last pseudo-GTID entry,
@@ -1355,15 +1355,15 @@ func FindLastPseudoGTIDEntry(instance *Instance, recordedInstanceRelayLogCoordin
 		return instancePseudoGtidCoordinates, instancePseudoGtidText, fmt.Errorf("PseudoGTIDPattern not configured; cannot use Pseudo-GTID")
 	}
 
-	if instance.LogBinEnabled && instance.LogSlaveUpdatesEnabled && !*config.RuntimeCLIFlags.SkipBinlogSearch && (expectedBinlogFormat == nil || instance.Binlog_format == *expectedBinlogFormat) {
+	if instance.LogBinEnabled && instance.LogSubordinateUpdatesEnabled && !*config.RuntimeCLIFlags.SkipBinlogSearch && (expectedBinlogFormat == nil || instance.Binlog_format == *expectedBinlogFormat) {
 		minBinlogCoordinates, _, _ := GetHeuristiclyRecentCoordinatesForInstance(&instance.Key)
 		// Well no need to search this instance's binary logs if it doesn't have any...
-		// With regard log-slave-updates, some edge cases are possible, like having this instance's log-slave-updates
+		// With regard log-subordinate-updates, some edge cases are possible, like having this instance's log-subordinate-updates
 		// enabled/disabled (of course having restarted it)
-		// The approach is not to take chances. If log-slave-updates is disabled, fail and go for relay-logs.
-		// If log-slave-updates was just enabled then possibly no pseudo-gtid is found, and so again we will go
+		// The approach is not to take chances. If log-subordinate-updates is disabled, fail and go for relay-logs.
+		// If log-subordinate-updates was just enabled then possibly no pseudo-gtid is found, and so again we will go
 		// for relay logs.
-		// Also, if master has STATEMENT binlog format, and the replica has ROW binlog format, then comparing binlog entries would urely fail if based on the replica's binary logs.
+		// Also, if main has STATEMENT binlog format, and the replica has ROW binlog format, then comparing binlog entries would urely fail if based on the replica's binary logs.
 		// Instead, we revert to the relay logs.
 		instancePseudoGtidCoordinates, instancePseudoGtidText, err = getLastPseudoGTIDEntryInInstance(instance, minBinlogCoordinates, maxBinlogCoordinates, exhaustiveSearch)
 	}
@@ -1421,9 +1421,9 @@ func CorrelateBinlogCoordinates(instance *Instance, binlogCoordinates *BinlogCoo
 }
 
 func CorrelateRelaylogCoordinates(instance *Instance, relaylogCoordinates *BinlogCoordinates, otherInstance *Instance) (instanceCoordinates, correlatedCoordinates, nextCoordinates *BinlogCoordinates, found bool, err error) {
-	// The two servers are expected to have the same master, or this doesn't work
-	if !instance.MasterKey.Equals(&otherInstance.MasterKey) {
-		return instanceCoordinates, correlatedCoordinates, nextCoordinates, found, log.Errorf("CorrelateRelaylogCoordinates requires sibling instances, however %+v has master %+v, and %+v has master %+v", instance.Key, instance.MasterKey, otherInstance.Key, otherInstance.MasterKey)
+	// The two servers are expected to have the same main, or this doesn't work
+	if !instance.MainKey.Equals(&otherInstance.MainKey) {
+		return instanceCoordinates, correlatedCoordinates, nextCoordinates, found, log.Errorf("CorrelateRelaylogCoordinates requires sibling instances, however %+v has main %+v, and %+v has main %+v", instance.Key, instance.MainKey, otherInstance.Key, otherInstance.MainKey)
 	}
 	var binlogEvent *BinlogEvent
 	if relaylogCoordinates == nil {
@@ -1509,7 +1509,7 @@ func MatchBelow(instanceKey, otherKey *InstanceKey, requireInstanceMaintenance b
 	}
 
 	log.Debugf("Stopping replica on %+v", *instanceKey)
-	instance, err = StopSlave(instanceKey)
+	instance, err = StopSubordinate(instanceKey)
 	if err != nil {
 		goto Cleanup
 	}
@@ -1523,13 +1523,13 @@ func MatchBelow(instanceKey, otherKey *InstanceKey, requireInstanceMaintenance b
 	log.Debugf("%+v will match below %+v at %+v; validated events: %d", *instanceKey, *otherKey, *nextBinlogCoordinatesToMatch, countMatchedEvents)
 
 	// Drum roll...
-	instance, err = ChangeMasterTo(instanceKey, otherKey, nextBinlogCoordinatesToMatch, false, GTIDHintDeny)
+	instance, err = ChangeMainTo(instanceKey, otherKey, nextBinlogCoordinatesToMatch, false, GTIDHintDeny)
 	if err != nil {
 		goto Cleanup
 	}
 
 Cleanup:
-	instance, _ = StartSlave(instanceKey)
+	instance, _ = StartSubordinate(instanceKey)
 	if err != nil {
 		return instance, nextBinlogCoordinatesToMatch, log.Errore(err)
 	}
@@ -1539,48 +1539,48 @@ Cleanup:
 	return instance, nextBinlogCoordinatesToMatch, err
 }
 
-// RematchReplica will re-match a replica to its master, using pseudo-gtid
+// RematchReplica will re-match a replica to its main, using pseudo-gtid
 func RematchReplica(instanceKey *InstanceKey, requireInstanceMaintenance bool) (*Instance, *BinlogCoordinates, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, nil, err
 	}
-	masterInstance, found, err := ReadInstance(&instance.MasterKey)
+	mainInstance, found, err := ReadInstance(&instance.MainKey)
 	if err != nil || !found {
 		return instance, nil, err
 	}
-	return MatchBelow(instanceKey, &masterInstance.Key, requireInstanceMaintenance)
+	return MatchBelow(instanceKey, &mainInstance.Key, requireInstanceMaintenance)
 }
 
-// MakeMaster will take an instance, make all its siblings its replicas (via pseudo-GTID) and make it master
+// MakeMain will take an instance, make all its siblings its replicas (via pseudo-GTID) and make it main
 // (stop its replicaiton, make writeable).
-func MakeMaster(instanceKey *InstanceKey) (*Instance, error) {
+func MakeMain(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
 	}
-	masterInstance, err := ReadTopologyInstance(&instance.MasterKey)
+	mainInstance, err := ReadTopologyInstance(&instance.MainKey)
 	if err == nil {
-		// If the read succeeded, check the master status.
-		if masterInstance.IsReplica() {
-			return instance, fmt.Errorf("MakeMaster: instance's master %+v seems to be replicating", masterInstance.Key)
+		// If the read succeeded, check the main status.
+		if mainInstance.IsReplica() {
+			return instance, fmt.Errorf("MakeMain: instance's main %+v seems to be replicating", mainInstance.Key)
 		}
-		if masterInstance.IsLastCheckValid {
-			return instance, fmt.Errorf("MakeMaster: instance's master %+v seems to be accessible", masterInstance.Key)
+		if mainInstance.IsLastCheckValid {
+			return instance, fmt.Errorf("MakeMain: instance's main %+v seems to be accessible", mainInstance.Key)
 		}
 	}
-	// Continue anyway if the read failed, because that means the master is
+	// Continue anyway if the read failed, because that means the main is
 	// inaccessible... So it's OK to do the promotion.
 	if !instance.SQLThreadUpToDate() {
-		return instance, fmt.Errorf("MakeMaster: instance's SQL thread must be up-to-date with I/O thread for %+v", *instanceKey)
+		return instance, fmt.Errorf("MakeMain: instance's SQL thread must be up-to-date with I/O thread for %+v", *instanceKey)
 	}
-	siblings, err := ReadReplicaInstances(&masterInstance.Key)
+	siblings, err := ReadReplicaInstances(&mainInstance.Key)
 	if err != nil {
 		return instance, err
 	}
 	for _, sibling := range siblings {
 		if instance.ExecBinlogCoordinates.SmallerThan(&sibling.ExecBinlogCoordinates) {
-			return instance, fmt.Errorf("MakeMaster: instance %+v has more advanced sibling: %+v", *instanceKey, sibling.Key)
+			return instance, fmt.Errorf("MakeMain: instance %+v has more advanced sibling: %+v", *instanceKey, sibling.Key)
 		}
 	}
 
@@ -1603,7 +1603,7 @@ Cleanup:
 		return instance, log.Errore(err)
 	}
 	// and we're done (pending deferred functions)
-	AuditOperation("make-master", instanceKey, fmt.Sprintf("made master of %+v", *instanceKey))
+	AuditOperation("make-main", instanceKey, fmt.Sprintf("made main of %+v", *instanceKey))
 
 	return instance, err
 }
@@ -1619,102 +1619,102 @@ func TakeSiblings(instanceKey *InstanceKey) (instance *Instance, takenSiblings i
 	if !instance.IsReplica() {
 		return instance, takenSiblings, log.Errorf("take-siblings: instance %+v is not a replica.", *instanceKey)
 	}
-	relocatedReplicas, _, err, _ := RelocateReplicas(&instance.MasterKey, instanceKey, "")
+	relocatedReplicas, _, err, _ := RelocateReplicas(&instance.MainKey, instanceKey, "")
 
 	return instance, len(relocatedReplicas), err
 }
 
-// TakeMaster will move an instance up the chain and cause its master to become its replica.
-// It's almost a role change, just that other replicas of either 'instance' or its master are currently unaffected
+// TakeMain will move an instance up the chain and cause its main to become its replica.
+// It's almost a role change, just that other replicas of either 'instance' or its main are currently unaffected
 // (they continue replicate without change)
-// Note that the master must itself be a replica; however the grandparent does not necessarily have to be reachable
+// Note that the main must itself be a replica; however the grandparent does not necessarily have to be reachable
 // and can in fact be dead.
-func TakeMaster(instanceKey *InstanceKey, allowTakingCoMaster bool) (*Instance, error) {
+func TakeMain(instanceKey *InstanceKey, allowTakingCoMain bool) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
 	}
-	masterInstance, found, err := ReadInstance(&instance.MasterKey)
+	mainInstance, found, err := ReadInstance(&instance.MainKey)
 	if err != nil || !found {
 		return instance, err
 	}
-	if masterInstance.IsCoMaster && !allowTakingCoMaster {
-		return instance, fmt.Errorf("%+v is co-master. Cannot take it.", masterInstance.Key)
+	if mainInstance.IsCoMain && !allowTakingCoMain {
+		return instance, fmt.Errorf("%+v is co-main. Cannot take it.", mainInstance.Key)
 	}
-	log.Debugf("TakeMaster: will attempt making %+v take its master %+v, now resolved as %+v", *instanceKey, instance.MasterKey, masterInstance.Key)
+	log.Debugf("TakeMain: will attempt making %+v take its main %+v, now resolved as %+v", *instanceKey, instance.MainKey, mainInstance.Key)
 
-	if canReplicate, err := masterInstance.CanReplicateFrom(instance); canReplicate == false {
+	if canReplicate, err := mainInstance.CanReplicateFrom(instance); canReplicate == false {
 		return instance, err
 	}
 	// We begin
-	masterInstance, err = StopSlave(&masterInstance.Key)
+	mainInstance, err = StopSubordinate(&mainInstance.Key)
 	if err != nil {
 		goto Cleanup
 	}
-	instance, err = StopSlave(&instance.Key)
-	if err != nil {
-		goto Cleanup
-	}
-
-	instance, err = StartSlaveUntilMasterCoordinates(&instance.Key, &masterInstance.SelfBinlogCoordinates)
+	instance, err = StopSubordinate(&instance.Key)
 	if err != nil {
 		goto Cleanup
 	}
 
-	// instance and masterInstance are equal
-	// We skip name unresolve. It is OK if the master's master is dead, unreachable, does not resolve properly.
-	// We just copy+paste info from the master.
-	// In particular, this is commonly calledin DeadMaster recovery
-	instance, err = ChangeMasterTo(&instance.Key, &masterInstance.MasterKey, &masterInstance.ExecBinlogCoordinates, true, GTIDHintNeutral)
+	instance, err = StartSubordinateUntilMainCoordinates(&instance.Key, &mainInstance.SelfBinlogCoordinates)
 	if err != nil {
 		goto Cleanup
 	}
-	// instance is now sibling of master
-	masterInstance, err = ChangeMasterTo(&masterInstance.Key, &instance.Key, &instance.SelfBinlogCoordinates, false, GTIDHintNeutral)
+
+	// instance and mainInstance are equal
+	// We skip name unresolve. It is OK if the main's main is dead, unreachable, does not resolve properly.
+	// We just copy+paste info from the main.
+	// In particular, this is commonly calledin DeadMain recovery
+	instance, err = ChangeMainTo(&instance.Key, &mainInstance.MainKey, &mainInstance.ExecBinlogCoordinates, true, GTIDHintNeutral)
+	if err != nil {
+		goto Cleanup
+	}
+	// instance is now sibling of main
+	mainInstance, err = ChangeMainTo(&mainInstance.Key, &instance.Key, &instance.SelfBinlogCoordinates, false, GTIDHintNeutral)
 	if err != nil {
 		goto Cleanup
 	}
 	// swap is done!
 
 Cleanup:
-	instance, _ = StartSlave(&instance.Key)
-	masterInstance, _ = StartSlave(&masterInstance.Key)
+	instance, _ = StartSubordinate(&instance.Key)
+	mainInstance, _ = StartSubordinate(&mainInstance.Key)
 	if err != nil {
 		return instance, err
 	}
-	AuditOperation("take-master", instanceKey, fmt.Sprintf("took master: %+v", masterInstance.Key))
+	AuditOperation("take-main", instanceKey, fmt.Sprintf("took main: %+v", mainInstance.Key))
 
 	return instance, err
 }
 
-// MakeLocalMaster promotes a replica above its master, making it replica of its grandparent, while also enslaving its siblings.
-// This serves as a convenience method to recover replication when a local master fails; the instance promoted is one of its replicas,
+// MakeLocalMain promotes a replica above its main, making it replica of its grandparent, while also enslaving its siblings.
+// This serves as a convenience method to recover replication when a local main fails; the instance promoted is one of its replicas,
 // which is most advanced among its siblings.
 // This method utilizes Pseudo GTID
-func MakeLocalMaster(instanceKey *InstanceKey) (*Instance, error) {
+func MakeLocalMain(instanceKey *InstanceKey) (*Instance, error) {
 	instance, err := ReadTopologyInstance(instanceKey)
 	if err != nil {
 		return instance, err
 	}
-	masterInstance, found, err := ReadInstance(&instance.MasterKey)
+	mainInstance, found, err := ReadInstance(&instance.MainKey)
 	if err != nil || !found {
 		return instance, err
 	}
-	grandparentInstance, err := ReadTopologyInstance(&masterInstance.MasterKey)
+	grandparentInstance, err := ReadTopologyInstance(&mainInstance.MainKey)
 	if err != nil {
 		return instance, err
 	}
-	siblings, err := ReadReplicaInstances(&masterInstance.Key)
+	siblings, err := ReadReplicaInstances(&mainInstance.Key)
 	if err != nil {
 		return instance, err
 	}
 	for _, sibling := range siblings {
 		if instance.ExecBinlogCoordinates.SmallerThan(&sibling.ExecBinlogCoordinates) {
-			return instance, fmt.Errorf("MakeMaster: instance %+v has more advanced sibling: %+v", *instanceKey, sibling.Key)
+			return instance, fmt.Errorf("MakeMain: instance %+v has more advanced sibling: %+v", *instanceKey, sibling.Key)
 		}
 	}
 
-	instance, err = StopSlaveNicely(instanceKey, 0)
+	instance, err = StopSubordinateNicely(instanceKey, 0)
 	if err != nil {
 		goto Cleanup
 	}
@@ -1734,7 +1734,7 @@ Cleanup:
 		return instance, log.Errore(err)
 	}
 	// and we're done (pending deferred functions)
-	AuditOperation("make-local-master", instanceKey, fmt.Sprintf("made master of %+v", *instanceKey))
+	AuditOperation("make-local-main", instanceKey, fmt.Sprintf("made main of %+v", *instanceKey))
 
 	return instance, err
 }
@@ -1749,12 +1749,12 @@ func sortInstances(instances [](*Instance)) {
 	sortInstancesDataCenterHint(instances, "")
 }
 
-// getReplicasForSorting returns a list of replicas of a given master potentially for candidate choosing
-func getReplicasForSorting(masterKey *InstanceKey, includeBinlogServerSubReplicas bool) (replicas [](*Instance), err error) {
+// getReplicasForSorting returns a list of replicas of a given main potentially for candidate choosing
+func getReplicasForSorting(mainKey *InstanceKey, includeBinlogServerSubReplicas bool) (replicas [](*Instance), err error) {
 	if includeBinlogServerSubReplicas {
-		replicas, err = ReadReplicaInstancesIncludingBinlogServerSubReplicas(masterKey)
+		replicas, err = ReadReplicaInstancesIncludingBinlogServerSubReplicas(mainKey)
 	} else {
-		replicas, err = ReadReplicaInstances(masterKey)
+		replicas, err = ReadReplicaInstances(mainKey)
 	}
 	return replicas, err
 }
@@ -1763,15 +1763,15 @@ func sortedReplicas(replicas [](*Instance), stopReplicationMethod StopReplicatio
 	return sortedReplicasDataCenterHint(replicas, stopReplicationMethod, "")
 }
 
-// sortedReplicas returns the list of replicas of some master, sorted by exec coordinates
+// sortedReplicas returns the list of replicas of some main, sorted by exec coordinates
 // (most up-to-date replica first).
 // This function assumes given `replicas` argument is indeed a list of instances all replicating
-// from the same master (the result of `getReplicasForSorting()` is appropriate)
+// from the same main (the result of `getReplicasForSorting()` is appropriate)
 func sortedReplicasDataCenterHint(replicas [](*Instance), stopReplicationMethod StopReplicationMethod, dataCenterHint string) [](*Instance) {
 	if len(replicas) == 0 {
 		return replicas
 	}
-	replicas = StopSlaves(replicas, stopReplicationMethod, time.Duration(config.Config.InstanceBulkOperationsWaitTimeoutSeconds)*time.Second)
+	replicas = StopSubordinates(replicas, stopReplicationMethod, time.Duration(config.Config.InstanceBulkOperationsWaitTimeoutSeconds)*time.Second)
 	replicas = RemoveNilInstances(replicas)
 
 	sortInstancesDataCenterHint(replicas, dataCenterHint)
@@ -1782,15 +1782,15 @@ func sortedReplicasDataCenterHint(replicas [](*Instance), stopReplicationMethod 
 	return replicas
 }
 
-// GetSortedReplicas reads list of replicas of a given master, and returns them sorted by exec coordinates
+// GetSortedReplicas reads list of replicas of a given main, and returns them sorted by exec coordinates
 // (most up-to-date replica first).
-func GetSortedReplicas(masterKey *InstanceKey, stopReplicationMethod StopReplicationMethod) (replicas [](*Instance), err error) {
-	if replicas, err = getReplicasForSorting(masterKey, false); err != nil {
+func GetSortedReplicas(mainKey *InstanceKey, stopReplicationMethod StopReplicationMethod) (replicas [](*Instance), err error) {
+	if replicas, err = getReplicasForSorting(mainKey, false); err != nil {
 		return replicas, err
 	}
 	replicas = sortedReplicas(replicas, stopReplicationMethod)
 	if len(replicas) == 0 {
-		return replicas, fmt.Errorf("No replicas found for %+v", *masterKey)
+		return replicas, fmt.Errorf("No replicas found for %+v", *mainKey)
 	}
 	return replicas, err
 }
@@ -1853,8 +1853,8 @@ func MultiMatchBelow(replicas [](*Instance), belowKey *InstanceKey, postponedFun
 	return matchedReplicas, belowInstance, err, errs
 }
 
-// MultiMatchReplicas will match (via pseudo-gtid) all replicas of given master below given instance.
-func MultiMatchReplicas(masterKey *InstanceKey, belowKey *InstanceKey, pattern string) ([](*Instance), *Instance, error, []error) {
+// MultiMatchReplicas will match (via pseudo-gtid) all replicas of given main below given instance.
+func MultiMatchReplicas(mainKey *InstanceKey, belowKey *InstanceKey, pattern string) ([](*Instance), *Instance, error, []error) {
 	res := [](*Instance){}
 	errs := []error{}
 
@@ -1864,36 +1864,36 @@ func MultiMatchReplicas(masterKey *InstanceKey, belowKey *InstanceKey, pattern s
 		return res, nil, err, errs
 	}
 
-	masterInstance, found, err := ReadInstance(masterKey)
+	mainInstance, found, err := ReadInstance(mainKey)
 	if err != nil || !found {
 		return res, nil, err, errs
 	}
 
 	// See if we have a binlog server case (special handling):
 	binlogCase := false
-	if masterInstance.IsBinlogServer() && masterInstance.MasterKey.Equals(belowKey) {
+	if mainInstance.IsBinlogServer() && mainInstance.MainKey.Equals(belowKey) {
 		// repoint-up
 		log.Debugf("MultiMatchReplicas: pointing replicas up from binlog server")
 		binlogCase = true
-	} else if belowInstance.IsBinlogServer() && belowInstance.MasterKey.Equals(masterKey) {
+	} else if belowInstance.IsBinlogServer() && belowInstance.MainKey.Equals(mainKey) {
 		// repoint-down
 		log.Debugf("MultiMatchReplicas: pointing replicas down to binlog server")
 		binlogCase = true
-	} else if masterInstance.IsBinlogServer() && belowInstance.IsBinlogServer() && masterInstance.MasterKey.Equals(&belowInstance.MasterKey) {
+	} else if mainInstance.IsBinlogServer() && belowInstance.IsBinlogServer() && mainInstance.MainKey.Equals(&belowInstance.MainKey) {
 		// Both BLS, siblings
 		log.Debugf("MultiMatchReplicas: pointing replicas to binlong sibling")
 		binlogCase = true
 	}
 	if binlogCase {
-		replicas, err, errors := RepointReplicasTo(masterKey, pattern, belowKey)
+		replicas, err, errors := RepointReplicasTo(mainKey, pattern, belowKey)
 		// Bail out!
-		return replicas, masterInstance, err, errors
+		return replicas, mainInstance, err, errors
 	}
 
 	// Not binlog server
 
 	// replicas involved
-	replicas, err := ReadReplicaInstancesIncludingBinlogServerSubReplicas(masterKey)
+	replicas, err := ReadReplicaInstancesIncludingBinlogServerSubReplicas(mainKey)
 	if err != nil {
 		return res, belowInstance, err, errs
 	}
@@ -1901,14 +1901,14 @@ func MultiMatchReplicas(masterKey *InstanceKey, belowKey *InstanceKey, pattern s
 	matchedReplicas, belowInstance, err, errs := MultiMatchBelow(replicas, &belowInstance.Key, nil)
 
 	if len(matchedReplicas) != len(replicas) {
-		err = fmt.Errorf("MultiMatchReplicas: only matched %d out of %d replicas of %+v; error is: %+v", len(matchedReplicas), len(replicas), *masterKey, err)
+		err = fmt.Errorf("MultiMatchReplicas: only matched %d out of %d replicas of %+v; error is: %+v", len(matchedReplicas), len(replicas), *mainKey, err)
 	}
-	AuditOperation("multi-match-replicas", masterKey, fmt.Sprintf("matched %d replicas under %+v", len(matchedReplicas), *belowKey))
+	AuditOperation("multi-match-replicas", mainKey, fmt.Sprintf("matched %d replicas under %+v", len(matchedReplicas), *belowKey))
 
 	return matchedReplicas, belowInstance, err, errs
 }
 
-// MatchUp will move a replica up the replication chain, so that it becomes sibling of its master, via Pseudo-GTID
+// MatchUp will move a replica up the replication chain, so that it becomes sibling of its main, via Pseudo-GTID
 func MatchUp(instanceKey *InstanceKey, requireInstanceMaintenance bool) (*Instance, *BinlogCoordinates, error) {
 	instance, found, err := ReadInstance(instanceKey)
 	if err != nil || !found {
@@ -1917,31 +1917,31 @@ func MatchUp(instanceKey *InstanceKey, requireInstanceMaintenance bool) (*Instan
 	if !instance.IsReplica() {
 		return instance, nil, fmt.Errorf("instance is not a replica: %+v", instanceKey)
 	}
-	master, found, err := ReadInstance(&instance.MasterKey)
+	main, found, err := ReadInstance(&instance.MainKey)
 	if err != nil || !found {
-		return instance, nil, log.Errorf("Cannot get master for %+v. error=%+v", instance.Key, err)
+		return instance, nil, log.Errorf("Cannot get main for %+v. error=%+v", instance.Key, err)
 	}
 
-	if !master.IsReplica() {
-		return instance, nil, fmt.Errorf("master is not a replica itself: %+v", master.Key)
+	if !main.IsReplica() {
+		return instance, nil, fmt.Errorf("main is not a replica itself: %+v", main.Key)
 	}
 
-	return MatchBelow(instanceKey, &master.MasterKey, requireInstanceMaintenance)
+	return MatchBelow(instanceKey, &main.MainKey, requireInstanceMaintenance)
 }
 
-// MatchUpReplicas will move all replicas of given master up the replication chain,
-// so that they become siblings of their master.
-// This should be called when the local master dies, and all its replicas are to be resurrected via Pseudo-GTID
-func MatchUpReplicas(masterKey *InstanceKey, pattern string) ([](*Instance), *Instance, error, []error) {
+// MatchUpReplicas will move all replicas of given main up the replication chain,
+// so that they become siblings of their main.
+// This should be called when the local main dies, and all its replicas are to be resurrected via Pseudo-GTID
+func MatchUpReplicas(mainKey *InstanceKey, pattern string) ([](*Instance), *Instance, error, []error) {
 	res := [](*Instance){}
 	errs := []error{}
 
-	masterInstance, found, err := ReadInstance(masterKey)
+	mainInstance, found, err := ReadInstance(mainKey)
 	if err != nil || !found {
 		return res, nil, err, errs
 	}
 
-	return MultiMatchReplicas(masterKey, &masterInstance.MasterKey, pattern)
+	return MultiMatchReplicas(mainKey, &mainInstance.MainKey, pattern)
 }
 
 func isGenerallyValidAsBinlogSource(replica *Instance) bool {
@@ -1952,7 +1952,7 @@ func isGenerallyValidAsBinlogSource(replica *Instance) bool {
 	if !replica.LogBinEnabled {
 		return false
 	}
-	if !replica.LogSlaveUpdatesEnabled {
+	if !replica.LogSubordinateUpdatesEnabled {
 		return false
 	}
 
@@ -1972,9 +1972,9 @@ func isGenerallyValidAsCandidateReplica(replica *Instance) bool {
 	return true
 }
 
-// isValidAsCandidateMasterInBinlogServerTopology let's us know whether a given replica is generally
-// valid to promote to be master.
-func isValidAsCandidateMasterInBinlogServerTopology(replica *Instance) bool {
+// isValidAsCandidateMainInBinlogServerTopology let's us know whether a given replica is generally
+// valid to promote to be main.
+func isValidAsCandidateMainInBinlogServerTopology(replica *Instance) bool {
 	if !replica.IsLastCheckValid {
 		// something wrong with this replica right now. We shouldn't hope to be able to promote it
 		return false
@@ -1982,7 +1982,7 @@ func isValidAsCandidateMasterInBinlogServerTopology(replica *Instance) bool {
 	if !replica.LogBinEnabled {
 		return false
 	}
-	if replica.LogSlaveUpdatesEnabled {
+	if replica.LogSubordinateUpdatesEnabled {
 		// That's right: we *disallow* log-replica-updates
 		return false
 	}
@@ -2064,7 +2064,7 @@ func chooseCandidateReplica(replicas [](*Instance)) (candidateReplica *Instance,
 		}
 	}
 	if candidateReplica == nil {
-		// Unable to find a candidate that will master others.
+		// Unable to find a candidate that will main others.
 		// Instead, pick a (single) replica which is not banned.
 		for _, replica := range replicas {
 			replica := replica
@@ -2097,8 +2097,8 @@ func chooseCandidateReplica(replicas [](*Instance)) (candidateReplica *Instance,
 	return candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err
 }
 
-// GetCandidateReplica chooses the best replica to promote given a (possibly dead) master
-func GetCandidateReplica(masterKey *InstanceKey, forRematchPurposes bool) (*Instance, [](*Instance), [](*Instance), [](*Instance), [](*Instance), error) {
+// GetCandidateReplica chooses the best replica to promote given a (possibly dead) main
+func GetCandidateReplica(mainKey *InstanceKey, forRematchPurposes bool) (*Instance, [](*Instance), [](*Instance), [](*Instance), [](*Instance), error) {
 	var candidateReplica *Instance
 	aheadReplicas := [](*Instance){}
 	equalReplicas := [](*Instance){}
@@ -2106,10 +2106,10 @@ func GetCandidateReplica(masterKey *InstanceKey, forRematchPurposes bool) (*Inst
 	cannotReplicateReplicas := [](*Instance){}
 
 	dataCenterHint := ""
-	if master, _, _ := ReadInstance(masterKey); master != nil {
-		dataCenterHint = master.DataCenter
+	if main, _, _ := ReadInstance(mainKey); main != nil {
+		dataCenterHint = main.DataCenter
 	}
-	replicas, err := getReplicasForSorting(masterKey, false)
+	replicas, err := getReplicasForSorting(mainKey, false)
 	if err != nil {
 		return candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err
 	}
@@ -2122,7 +2122,7 @@ func GetCandidateReplica(masterKey *InstanceKey, forRematchPurposes bool) (*Inst
 		return candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err
 	}
 	if len(replicas) == 0 {
-		return candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, fmt.Errorf("No replicas found for %+v", *masterKey)
+		return candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, fmt.Errorf("No replicas found for %+v", *mainKey)
 	}
 	candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err = chooseCandidateReplica(replicas)
 	if err != nil {
@@ -2138,37 +2138,37 @@ func GetCandidateReplica(masterKey *InstanceKey, forRematchPurposes bool) (*Inst
 	return candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, nil
 }
 
-// GetCandidateReplicaOfBinlogServerTopology chooses the best replica to promote given a (possibly dead) master
-func GetCandidateReplicaOfBinlogServerTopology(masterKey *InstanceKey) (candidateReplica *Instance, err error) {
-	replicas, err := getReplicasForSorting(masterKey, true)
+// GetCandidateReplicaOfBinlogServerTopology chooses the best replica to promote given a (possibly dead) main
+func GetCandidateReplicaOfBinlogServerTopology(mainKey *InstanceKey) (candidateReplica *Instance, err error) {
+	replicas, err := getReplicasForSorting(mainKey, true)
 	if err != nil {
 		return candidateReplica, err
 	}
 	replicas = sortedReplicas(replicas, NoStopReplication)
 	if len(replicas) == 0 {
-		return candidateReplica, fmt.Errorf("No replicas found for %+v", *masterKey)
+		return candidateReplica, fmt.Errorf("No replicas found for %+v", *mainKey)
 	}
 	for _, replica := range replicas {
 		replica := replica
 		if candidateReplica != nil {
 			break
 		}
-		if isValidAsCandidateMasterInBinlogServerTopology(replica) && !IsBannedFromBeingCandidateReplica(replica) {
+		if isValidAsCandidateMainInBinlogServerTopology(replica) && !IsBannedFromBeingCandidateReplica(replica) {
 			// this is the one
 			candidateReplica = replica
 		}
 	}
 	if candidateReplica != nil {
-		log.Debugf("GetCandidateReplicaOfBinlogServerTopology: returning %+v as candidate replica for %+v", candidateReplica.Key, *masterKey)
+		log.Debugf("GetCandidateReplicaOfBinlogServerTopology: returning %+v as candidate replica for %+v", candidateReplica.Key, *mainKey)
 	} else {
-		log.Debugf("GetCandidateReplicaOfBinlogServerTopology: no candidate replica found for %+v", *masterKey)
+		log.Debugf("GetCandidateReplicaOfBinlogServerTopology: no candidate replica found for %+v", *mainKey)
 	}
 	return candidateReplica, err
 }
 
 // RegroupReplicasPseudoGTID will choose a candidate replica of a given instance, and take its siblings using pseudo-gtid
 func RegroupReplicasPseudoGTID(
-	masterKey *InstanceKey,
+	mainKey *InstanceKey,
 	returnReplicaEvenOnFailureToRegroup bool,
 	onCandidateReplicaChosen func(*Instance),
 	postponedFunctionsContainer *PostponedFunctionsContainer,
@@ -2181,7 +2181,7 @@ func RegroupReplicasPseudoGTID(
 	candidateReplica *Instance,
 	err error,
 ) {
-	candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err = GetCandidateReplica(masterKey, true)
+	candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err = GetCandidateReplica(mainKey, true)
 	if err != nil {
 		if !returnReplicaEvenOnFailureToRegroup {
 			candidateReplica = nil
@@ -2207,7 +2207,7 @@ func RegroupReplicasPseudoGTID(
 			go func() {
 				defer func() { barrier <- &candidateReplica.Key }()
 				ExecuteOnTopology(func() {
-					ChangeMasterTo(&replica.Key, &candidateReplica.Key, &candidateReplica.SelfBinlogCoordinates, false, GTIDHintDeny)
+					ChangeMainTo(&replica.Key, &candidateReplica.Key, &candidateReplica.SelfBinlogCoordinates, false, GTIDHintDeny)
 				})
 			}()
 		}
@@ -2228,14 +2228,14 @@ func RegroupReplicasPseudoGTID(
 			go func() {
 				defer func() { barrier <- &candidateReplica.Key }()
 				ExecuteOnTopology(func() {
-					StartSlave(&replica.Key)
+					StartSubordinate(&replica.Key)
 				})
 			}()
 		}
 		for range operatedReplicas {
 			<-barrier
 		}
-		AuditOperation("regroup-replicas", masterKey, fmt.Sprintf("regrouped %+v replicas below %+v", len(operatedReplicas), *masterKey))
+		AuditOperation("regroup-replicas", mainKey, fmt.Sprintf("regrouped %+v replicas below %+v", len(operatedReplicas), *mainKey))
 		return err
 	}
 	if postponedFunctionsContainer != nil && postponeAllMatchOperations != nil && postponeAllMatchOperations(candidateReplica) {
@@ -2248,8 +2248,8 @@ func RegroupReplicasPseudoGTID(
 	return aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, candidateReplica, err
 }
 
-func getMostUpToDateActiveBinlogServer(masterKey *InstanceKey) (mostAdvancedBinlogServer *Instance, binlogServerReplicas [](*Instance), err error) {
-	if binlogServerReplicas, err = ReadBinlogServerReplicaInstances(masterKey); err == nil && len(binlogServerReplicas) > 0 {
+func getMostUpToDateActiveBinlogServer(mainKey *InstanceKey) (mostAdvancedBinlogServer *Instance, binlogServerReplicas [](*Instance), err error) {
+	if binlogServerReplicas, err = ReadBinlogServerReplicaInstances(mainKey); err == nil && len(binlogServerReplicas) > 0 {
 		// Pick the most advanced binlog sever that is good to go
 		for _, binlogServer := range binlogServerReplicas {
 			if binlogServer.IsLastCheckValid {
@@ -2269,7 +2269,7 @@ func getMostUpToDateActiveBinlogServer(masterKey *InstanceKey) (mostAdvancedBinl
 // of given instance. The function also drill in to replicas of binlog servers that are replicating from given instance,
 // and other recursive binlog servers, as long as they're in the same binlog-server-family.
 func RegroupReplicasPseudoGTIDIncludingSubReplicasOfBinlogServers(
-	masterKey *InstanceKey,
+	mainKey *InstanceKey,
 	returnReplicaEvenOnFailureToRegroup bool,
 	onCandidateReplicaChosen func(*Instance),
 	postponedFunctionsContainer *PostponedFunctionsContainer,
@@ -2284,30 +2284,30 @@ func RegroupReplicasPseudoGTIDIncludingSubReplicasOfBinlogServers(
 ) {
 	// First, handle binlog server issues:
 	func() error {
-		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: starting on replicas of %+v", *masterKey)
+		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: starting on replicas of %+v", *mainKey)
 		// Find the most up to date binlog server:
-		mostUpToDateBinlogServer, binlogServerReplicas, err := getMostUpToDateActiveBinlogServer(masterKey)
+		mostUpToDateBinlogServer, binlogServerReplicas, err := getMostUpToDateActiveBinlogServer(mainKey)
 		if err != nil {
 			return log.Errore(err)
 		}
 		if mostUpToDateBinlogServer == nil {
-			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: no binlog server replicates from %+v", *masterKey)
+			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: no binlog server replicates from %+v", *mainKey)
 			// No binlog server; proceed as normal
 			return nil
 		}
-		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: most up to date binlog server of %+v: %+v", *masterKey, mostUpToDateBinlogServer.Key)
+		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: most up to date binlog server of %+v: %+v", *mainKey, mostUpToDateBinlogServer.Key)
 
 		// Find the most up to date candidate replica:
-		candidateReplica, _, _, _, _, err := GetCandidateReplica(masterKey, true)
+		candidateReplica, _, _, _, _, err := GetCandidateReplica(mainKey, true)
 		if err != nil {
 			return log.Errore(err)
 		}
 		if candidateReplica == nil {
-			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: no candidate replica for %+v", *masterKey)
+			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: no candidate replica for %+v", *mainKey)
 			// Let the followup code handle that
 			return nil
 		}
-		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: candidate replica of %+v: %+v", *masterKey, candidateReplica.Key)
+		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: candidate replica of %+v: %+v", *mainKey, candidateReplica.Key)
 
 		if candidateReplica.ExecBinlogCoordinates.SmallerThan(&mostUpToDateBinlogServer.ExecBinlogCoordinates) {
 			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: candidate replica %+v coordinates smaller than binlog server %+v", candidateReplica.Key, mostUpToDateBinlogServer.Key)
@@ -2317,17 +2317,17 @@ func RegroupReplicasPseudoGTIDIncludingSubReplicasOfBinlogServers(
 				return log.Errore(err)
 			}
 			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: repointed candidate replica %+v under binlog server %+v", candidateReplica.Key, mostUpToDateBinlogServer.Key)
-			candidateReplica, err = StartSlaveUntilMasterCoordinates(&candidateReplica.Key, &mostUpToDateBinlogServer.ExecBinlogCoordinates)
+			candidateReplica, err = StartSubordinateUntilMainCoordinates(&candidateReplica.Key, &mostUpToDateBinlogServer.ExecBinlogCoordinates)
 			if err != nil {
 				return log.Errore(err)
 			}
 			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: aligned candidate replica %+v under binlog server %+v", candidateReplica.Key, mostUpToDateBinlogServer.Key)
 			// and move back
-			candidateReplica, err = Repoint(&candidateReplica.Key, masterKey, GTIDHintDeny)
+			candidateReplica, err = Repoint(&candidateReplica.Key, mainKey, GTIDHintDeny)
 			if err != nil {
 				return log.Errore(err)
 			}
-			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: repointed candidate replica %+v under master %+v", candidateReplica.Key, *masterKey)
+			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: repointed candidate replica %+v under main %+v", candidateReplica.Key, *mainKey)
 			return nil
 		}
 		// Either because it _was_ like that, or we _made_ it so,
@@ -2339,17 +2339,17 @@ func RegroupReplicasPseudoGTIDIncludingSubReplicasOfBinlogServers(
 			MultiMatchReplicas(&binlogServer.Key, &candidateReplica.Key, "")
 			log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: done matching replicas of binlog server %+v below %+v", binlogServer.Key, candidateReplica.Key)
 		}
-		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: done handling binlog regrouping for %+v; will proceed with normal RegroupReplicas", *masterKey)
-		AuditOperation("regroup-replicas-including-bls", masterKey, fmt.Sprintf("matched replicas of binlog server replicas of %+v under %+v", *masterKey, candidateReplica.Key))
+		log.Debugf("RegroupReplicasIncludingSubReplicasOfBinlogServers: done handling binlog regrouping for %+v; will proceed with normal RegroupReplicas", *mainKey)
+		AuditOperation("regroup-replicas-including-bls", mainKey, fmt.Sprintf("matched replicas of binlog server replicas of %+v under %+v", *mainKey, candidateReplica.Key))
 		return nil
 	}()
 	// Proceed to normal regroup:
-	return RegroupReplicasPseudoGTID(masterKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, postponedFunctionsContainer, postponeAllMatchOperations)
+	return RegroupReplicasPseudoGTID(mainKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, postponedFunctionsContainer, postponeAllMatchOperations)
 }
 
 // RegroupReplicasGTID will choose a candidate replica of a given instance, and take its siblings using GTID
 func RegroupReplicasGTID(
-	masterKey *InstanceKey,
+	mainKey *InstanceKey,
 	returnReplicaEvenOnFailureToRegroup bool,
 	onCandidateReplicaChosen func(*Instance),
 	postponedFunctionsContainer *PostponedFunctionsContainer,
@@ -2363,7 +2363,7 @@ func RegroupReplicasGTID(
 ) {
 	var emptyReplicas [](*Instance)
 	var unmovedReplicas [](*Instance)
-	candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err := GetCandidateReplica(masterKey, true)
+	candidateReplica, aheadReplicas, equalReplicas, laterReplicas, cannotReplicateReplicas, err := GetCandidateReplica(mainKey, true)
 	if err != nil {
 		if !returnReplicaEvenOnFailureToRegroup {
 			candidateReplica = nil
@@ -2388,18 +2388,18 @@ func RegroupReplicasGTID(
 		err = moveGTIDFunc()
 	}
 
-	StartSlave(&candidateReplica.Key)
+	StartSubordinate(&candidateReplica.Key)
 
 	log.Debugf("RegroupReplicasGTID: done")
-	AuditOperation("regroup-replicas-gtid", masterKey, fmt.Sprintf("regrouped replicas of %+v via GTID; promoted %+v", *masterKey, candidateReplica.Key))
+	AuditOperation("regroup-replicas-gtid", mainKey, fmt.Sprintf("regrouped replicas of %+v via GTID; promoted %+v", *mainKey, candidateReplica.Key))
 	return unmovedReplicas, movedReplicas, cannotReplicateReplicas, candidateReplica, err
 }
 
 // RegroupReplicasBinlogServers works on a binlog-servers topology. It picks the most up-to-date BLS and repoints all other
 // BLS below it
-func RegroupReplicasBinlogServers(masterKey *InstanceKey, returnReplicaEvenOnFailureToRegroup bool) (repointedBinlogServers [](*Instance), promotedBinlogServer *Instance, err error) {
+func RegroupReplicasBinlogServers(mainKey *InstanceKey, returnReplicaEvenOnFailureToRegroup bool) (repointedBinlogServers [](*Instance), promotedBinlogServer *Instance, err error) {
 	var binlogServerReplicas [](*Instance)
-	promotedBinlogServer, binlogServerReplicas, err = getMostUpToDateActiveBinlogServer(masterKey)
+	promotedBinlogServer, binlogServerReplicas, err = getMostUpToDateActiveBinlogServer(mainKey)
 
 	resultOnError := func(err error) ([](*Instance), *Instance, error) {
 		if !returnReplicaEvenOnFailureToRegroup {
@@ -2417,13 +2417,13 @@ func RegroupReplicasBinlogServers(masterKey *InstanceKey, returnReplicaEvenOnFai
 	if err != nil {
 		return resultOnError(err)
 	}
-	AuditOperation("regroup-replicas-bls", masterKey, fmt.Sprintf("regrouped binlog server replicas of %+v; promoted %+v", *masterKey, promotedBinlogServer.Key))
+	AuditOperation("regroup-replicas-bls", mainKey, fmt.Sprintf("regrouped binlog server replicas of %+v; promoted %+v", *mainKey, promotedBinlogServer.Key))
 	return repointedBinlogServers, promotedBinlogServer, nil
 }
 
 // RegroupReplicas is a "smart" method of promoting one replica over the others ("promoting" it on top of its siblings)
 // This method decides which strategy to use: GTID, Pseudo-GTID, Binlog Servers.
-func RegroupReplicas(masterKey *InstanceKey, returnReplicaEvenOnFailureToRegroup bool,
+func RegroupReplicas(mainKey *InstanceKey, returnReplicaEvenOnFailureToRegroup bool,
 	onCandidateReplicaChosen func(*Instance),
 	postponedFunctionsContainer *PostponedFunctionsContainer) (
 
@@ -2437,7 +2437,7 @@ func RegroupReplicas(masterKey *InstanceKey, returnReplicaEvenOnFailureToRegroup
 	//
 	var emptyReplicas [](*Instance)
 
-	replicas, err := ReadReplicaInstances(masterKey)
+	replicas, err := ReadReplicaInstances(mainKey)
 	if err != nil {
 		return emptyReplicas, emptyReplicas, emptyReplicas, emptyReplicas, instance, err
 	}
@@ -2462,22 +2462,22 @@ func RegroupReplicas(masterKey *InstanceKey, returnReplicaEvenOnFailureToRegroup
 		}
 	}
 	if allGTID {
-		log.Debugf("RegroupReplicas: using GTID to regroup replicas of %+v", *masterKey)
-		unmovedReplicas, movedReplicas, cannotReplicateReplicas, candidateReplica, err := RegroupReplicasGTID(masterKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, nil, nil)
+		log.Debugf("RegroupReplicas: using GTID to regroup replicas of %+v", *mainKey)
+		unmovedReplicas, movedReplicas, cannotReplicateReplicas, candidateReplica, err := RegroupReplicasGTID(mainKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, nil, nil)
 		return unmovedReplicas, emptyReplicas, movedReplicas, cannotReplicateReplicas, candidateReplica, err
 	}
 	if allBinlogServers {
-		log.Debugf("RegroupReplicas: using binlog servers to regroup replicas of %+v", *masterKey)
-		movedReplicas, candidateReplica, err := RegroupReplicasBinlogServers(masterKey, returnReplicaEvenOnFailureToRegroup)
+		log.Debugf("RegroupReplicas: using binlog servers to regroup replicas of %+v", *mainKey)
+		movedReplicas, candidateReplica, err := RegroupReplicasBinlogServers(mainKey, returnReplicaEvenOnFailureToRegroup)
 		return emptyReplicas, emptyReplicas, movedReplicas, cannotReplicateReplicas, candidateReplica, err
 	}
 	if allPseudoGTID {
-		log.Debugf("RegroupReplicas: using Pseudo-GTID to regroup replicas of %+v", *masterKey)
-		return RegroupReplicasPseudoGTID(masterKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, postponedFunctionsContainer, nil)
+		log.Debugf("RegroupReplicas: using Pseudo-GTID to regroup replicas of %+v", *mainKey)
+		return RegroupReplicasPseudoGTID(mainKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, postponedFunctionsContainer, nil)
 	}
 	// And, as last resort, we do PseudoGTID & binlog servers
-	log.Warningf("RegroupReplicas: unsure what method to invoke for %+v; trying Pseudo-GTID+Binlog Servers", *masterKey)
-	return RegroupReplicasPseudoGTIDIncludingSubReplicasOfBinlogServers(masterKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, postponedFunctionsContainer, nil)
+	log.Warningf("RegroupReplicas: unsure what method to invoke for %+v; trying Pseudo-GTID+Binlog Servers", *mainKey)
+	return RegroupReplicasPseudoGTIDIncludingSubReplicasOfBinlogServers(mainKey, returnReplicaEvenOnFailureToRegroup, onCandidateReplicaChosen, postponedFunctionsContainer, nil)
 }
 
 // relocateBelowInternal is a protentially recursive function which chooses how to relocate an instance below another.
@@ -2488,7 +2488,7 @@ func relocateBelowInternal(instance, other *Instance) (*Instance, error) {
 		return instance, log.Errorf("%+v cannot replicate from %+v. Reason: %+v", instance.Key, other.Key, err)
 	}
 	// simplest:
-	if InstanceIsMasterOf(other, instance) {
+	if InstanceIsMainOf(other, instance) {
 		// already the desired setup.
 		return Repoint(&instance.Key, &other.Key, GTIDHintNeutral)
 	}
@@ -2502,41 +2502,41 @@ func relocateBelowInternal(instance, other *Instance) (*Instance, error) {
 	if InstancesAreSiblings(instance, other) && other.IsBinlogServer() {
 		return MoveBelow(&instance.Key, &other.Key)
 	}
-	instanceMaster, _, err := ReadInstance(&instance.MasterKey)
+	instanceMain, _, err := ReadInstance(&instance.MainKey)
 	if err != nil {
 		return instance, err
 	}
-	if instanceMaster != nil && instanceMaster.MasterKey.Equals(&other.Key) && instanceMaster.IsBinlogServer() {
+	if instanceMain != nil && instanceMain.MainKey.Equals(&other.Key) && instanceMain.IsBinlogServer() {
 		// Moving to grandparent via binlog server
-		return Repoint(&instance.Key, &instanceMaster.MasterKey, GTIDHintDeny)
+		return Repoint(&instance.Key, &instanceMain.MainKey, GTIDHintDeny)
 	}
 	if other.IsBinlogServer() {
-		if instanceMaster != nil && instanceMaster.IsBinlogServer() && InstancesAreSiblings(instanceMaster, other) {
+		if instanceMain != nil && instanceMain.IsBinlogServer() && InstancesAreSiblings(instanceMain, other) {
 			// Special case: this is a binlog server family; we move under the uncle, in one single step
 			return Repoint(&instance.Key, &other.Key, GTIDHintDeny)
 		}
 
-		// Relocate to its master, then repoint to the binlog server
-		otherMaster, found, err := ReadInstance(&other.MasterKey)
+		// Relocate to its main, then repoint to the binlog server
+		otherMain, found, err := ReadInstance(&other.MainKey)
 		if err != nil {
 			return instance, err
 		}
 		if !found {
-			return instance, log.Errorf("Cannot find master %+v", other.MasterKey)
+			return instance, log.Errorf("Cannot find main %+v", other.MainKey)
 		}
 		if !other.IsLastCheckValid {
 			return instance, log.Errorf("Binlog server %+v is not reachable. It would take two steps to relocate %+v below it, and I won't even do the first step.", other.Key, instance.Key)
 		}
 
-		log.Debugf("Relocating to a binlog server; will first attempt to relocate to the binlog server's master: %+v, and then repoint down", otherMaster.Key)
-		if _, err := relocateBelowInternal(instance, otherMaster); err != nil {
+		log.Debugf("Relocating to a binlog server; will first attempt to relocate to the binlog server's main: %+v, and then repoint down", otherMain.Key)
+		if _, err := relocateBelowInternal(instance, otherMain); err != nil {
 			return instance, err
 		}
 		return Repoint(&instance.Key, &other.Key, GTIDHintDeny)
 	}
 	if instance.IsBinlogServer() {
 		// Can only move within the binlog-server family tree
-		// And these have been covered just now: move up from a master binlog server, move below a binling binlog server.
+		// And these have been covered just now: move up from a main binlog server, move below a binling binlog server.
 		// sure, the family can be more complex, but we keep these operations atomic
 		return nil, log.Errorf("Relocating binlog server %+v below %+v turns to be too complex; please do it manually", instance.Key, other.Key)
 	}
@@ -2554,17 +2554,17 @@ func relocateBelowInternal(instance, other *Instance) (*Instance, error) {
 	}
 	// No Pseudo-GTID; cehck simple binlog file/pos operations:
 	if InstancesAreSiblings(instance, other) {
-		// If comastering, only move below if it's read-only
-		if !other.IsCoMaster || other.ReadOnly {
+		// If comaining, only move below if it's read-only
+		if !other.IsCoMain || other.ReadOnly {
 			return MoveBelow(&instance.Key, &other.Key)
 		}
 	}
 	// See if we need to MoveUp
-	if instanceMaster != nil && instanceMaster.MasterKey.Equals(&other.Key) {
-		// Moving to grandparent--handles co-mastering writable case
+	if instanceMain != nil && instanceMain.MainKey.Equals(&other.Key) {
+		// Moving to grandparent--handles co-maining writable case
 		return MoveUp(&instance.Key)
 	}
-	if instanceMaster != nil && instanceMaster.IsBinlogServer() {
+	if instanceMain != nil && instanceMain.IsBinlogServer() {
 		// Break operation into two: move (repoint) up, then continue
 		if _, err := MoveUp(&instance.Key); err != nil {
 			return instance, err
@@ -2610,11 +2610,11 @@ func relocateReplicasInternal(replicas [](*Instance), instance, other *Instance)
 		return RepointTo(replicas, &other.Key)
 	}
 	// Try and take advantage of binlog servers:
-	if InstanceIsMasterOf(other, instance) && instance.IsBinlogServer() {
+	if InstanceIsMainOf(other, instance) && instance.IsBinlogServer() {
 		// Up from a binlog server
 		return RepointTo(replicas, &other.Key)
 	}
-	if InstanceIsMasterOf(instance, other) && other.IsBinlogServer() {
+	if InstanceIsMainOf(instance, other) && other.IsBinlogServer() {
 		// Down under a binlog server
 		return RepointTo(replicas, &other.Key)
 	}
@@ -2624,11 +2624,11 @@ func relocateReplicasInternal(replicas [](*Instance), instance, other *Instance)
 	}
 	if other.IsBinlogServer() {
 		// Relocate to binlog server's parent (recursive call), then repoint down
-		otherMaster, found, err := ReadInstance(&other.MasterKey)
+		otherMain, found, err := ReadInstance(&other.MainKey)
 		if err != nil || !found {
 			return nil, err, errs
 		}
-		replicas, err, errs = relocateReplicasInternal(replicas, instance, otherMaster)
+		replicas, err, errs = relocateReplicasInternal(replicas, instance, otherMain)
 		if err != nil {
 			return replicas, err, errs
 		}
@@ -2664,7 +2664,7 @@ func relocateReplicasInternal(replicas [](*Instance), instance, other *Instance)
 	}
 
 	// Normal binlog file:pos
-	if InstanceIsMasterOf(other, instance) {
+	if InstanceIsMainOf(other, instance) {
 		// MoveUpReplicas -- but not supporting "replicas" argument at this time.
 	}
 

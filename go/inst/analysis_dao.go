@@ -51,7 +51,7 @@ func initializeAnalysisDaoPostConfiguration() {
 	recentInstantAnalysis = cache.New(time.Duration(config.RecoveryPollSeconds*2)*time.Second, time.Second)
 }
 
-// GetReplicationAnalysis will check for replication problems (dead master; unreachable master; etc)
+// GetReplicationAnalysis will check for replication problems (dead main; unreachable main; etc)
 func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints) ([]ReplicationAnalysis, error) {
 	result := []ReplicationAnalysis{}
 
@@ -61,25 +61,25 @@ func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints)
 		analysisQueryReductionClause = `
 			HAVING
 				(MIN(
-					master_instance.last_checked <= master_instance.last_seen
-					and master_instance.last_attempted_check <= master_instance.last_seen + interval ? second
+					main_instance.last_checked <= main_instance.last_seen
+					and main_instance.last_attempted_check <= main_instance.last_seen + interval ? second
        	 ) = 1 /* AS is_last_check_valid */) = 0
 				OR (IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen
-		                    AND replica_instance.slave_io_running = 0
-		                    AND replica_instance.last_io_error like '%error %connecting to master%'
-		                    AND replica_instance.slave_sql_running = 1),
-		                0) /* AS count_replicas_failing_to_connect_to_master */ > 0)
+		                    AND replica_instance.subordinate_io_running = 0
+		                    AND replica_instance.last_io_error like '%error %connecting to main%'
+		                    AND replica_instance.subordinate_sql_running = 1),
+		                0) /* AS count_replicas_failing_to_connect_to_main */ > 0)
 				OR (IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen),
-		                0) /* AS count_valid_slaves */ < COUNT(replica_instance.server_id) /* AS count_replicas */)
+		                0) /* AS count_valid_subordinates */ < COUNT(replica_instance.server_id) /* AS count_replicas */)
 				OR (IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen
-		                    AND replica_instance.slave_io_running != 0
-		                    AND replica_instance.slave_sql_running != 0),
-		                0) /* AS count_valid_replicating_slaves */ < COUNT(replica_instance.server_id) /* AS count_replicas */)
+		                    AND replica_instance.subordinate_io_running != 0
+		                    AND replica_instance.subordinate_sql_running != 0),
+		                0) /* AS count_valid_replicating_subordinates */ < COUNT(replica_instance.server_id) /* AS count_replicas */)
 				OR (MIN(
-		            master_instance.slave_sql_running = 1
-		            AND master_instance.slave_io_running = 0
-		            AND master_instance.last_io_error like '%error %connecting to master%'
-		          ) /* AS is_failing_to_connect_to_master */)
+		            main_instance.subordinate_sql_running = 1
+		            AND main_instance.subordinate_io_running = 0
+		            AND main_instance.last_io_error like '%error %connecting to main%'
+		          ) /* AS is_failing_to_connect_to_main */)
 				OR (COUNT(replica_instance.server_id) /* AS count_replicas */ > 0)
 			`
 		args = append(args, ValidSecondsFromSeenToLastAttemptedCheck())
@@ -88,101 +88,101 @@ func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints)
 	// It gives more output, and more "NoProblem" messages that I am now interested in for purpose of auditing in database_instance_analysis_changelog
 	query := fmt.Sprintf(`
 		    SELECT
-		        master_instance.hostname,
-		        master_instance.port,
-						MIN(master_instance.data_center) AS data_center,
-						MIN(master_instance.physical_environment) AS physical_environment,
-		        MIN(master_instance.master_host) AS master_host,
-		        MIN(master_instance.master_port) AS master_port,
-		        MIN(master_instance.cluster_name) AS cluster_name,
-		        MIN(IFNULL(cluster_alias.alias, master_instance.cluster_name)) AS cluster_alias,
+		        main_instance.hostname,
+		        main_instance.port,
+						MIN(main_instance.data_center) AS data_center,
+						MIN(main_instance.physical_environment) AS physical_environment,
+		        MIN(main_instance.main_host) AS main_host,
+		        MIN(main_instance.main_port) AS main_port,
+		        MIN(main_instance.cluster_name) AS cluster_name,
+		        MIN(IFNULL(cluster_alias.alias, main_instance.cluster_name)) AS cluster_alias,
 		        MIN(
-							master_instance.last_checked <= master_instance.last_seen
-							and master_instance.last_attempted_check <= master_instance.last_seen + interval ? second
+							main_instance.last_checked <= main_instance.last_seen
+							and main_instance.last_attempted_check <= main_instance.last_seen + interval ? second
 		        	) = 1 AS is_last_check_valid,
-						MIN(master_instance.last_check_partial_success) as last_check_partial_success,
-		        MIN(master_instance.master_host IN ('' , '_')
-		            OR master_instance.master_port = 0
-								OR substr(master_instance.master_host, 1, 2) = '//') AS is_master,
-		        MIN(master_instance.is_co_master) AS is_co_master,
-		        MIN(CONCAT(master_instance.hostname,
+						MIN(main_instance.last_check_partial_success) as last_check_partial_success,
+		        MIN(main_instance.main_host IN ('' , '_')
+		            OR main_instance.main_port = 0
+								OR substr(main_instance.main_host, 1, 2) = '//') AS is_main,
+		        MIN(main_instance.is_co_main) AS is_co_main,
+		        MIN(CONCAT(main_instance.hostname,
 		                ':',
-		                master_instance.port) = master_instance.cluster_name) AS is_cluster_master,
-						MIN(master_instance.gtid_mode) AS gtid_mode,
+		                main_instance.port) = main_instance.cluster_name) AS is_cluster_main,
+						MIN(main_instance.gtid_mode) AS gtid_mode,
 		        COUNT(replica_instance.server_id) AS count_replicas,
 		        IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen),
-		                0) AS count_valid_slaves,
+		                0) AS count_valid_subordinates,
 		        IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen
-		                    AND replica_instance.slave_io_running != 0
-		                    AND replica_instance.slave_sql_running != 0),
-		                0) AS count_valid_replicating_slaves,
+		                    AND replica_instance.subordinate_io_running != 0
+		                    AND replica_instance.subordinate_sql_running != 0),
+		                0) AS count_valid_replicating_subordinates,
 		        IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen
-		                    AND replica_instance.slave_io_running = 0
-		                    AND replica_instance.last_io_error like '%%error %%connecting to master%%'
-		                    AND replica_instance.slave_sql_running = 1),
-		                0) AS count_replicas_failing_to_connect_to_master,
-		        MIN(master_instance.replication_depth) AS replication_depth,
-		        GROUP_CONCAT(concat(replica_instance.Hostname, ':', replica_instance.Port)) as slave_hosts,
+		                    AND replica_instance.subordinate_io_running = 0
+		                    AND replica_instance.last_io_error like '%%error %%connecting to main%%'
+		                    AND replica_instance.subordinate_sql_running = 1),
+		                0) AS count_replicas_failing_to_connect_to_main,
+		        MIN(main_instance.replication_depth) AS replication_depth,
+		        GROUP_CONCAT(concat(replica_instance.Hostname, ':', replica_instance.Port)) as subordinate_hosts,
 		        MIN(
-		            master_instance.slave_sql_running = 1
-		            AND master_instance.slave_io_running = 0
-		            AND master_instance.last_io_error like '%%error %%connecting to master%%'
-		          ) AS is_failing_to_connect_to_master,
+		            main_instance.subordinate_sql_running = 1
+		            AND main_instance.subordinate_io_running = 0
+		            AND main_instance.last_io_error like '%%error %%connecting to main%%'
+		          ) AS is_failing_to_connect_to_main,
 						MIN(
-								master_downtime.downtime_active is not null
-								and ifnull(master_downtime.end_timestamp, now()) > now()
+								main_downtime.downtime_active is not null
+								and ifnull(main_downtime.end_timestamp, now()) > now()
 							) AS is_downtimed,
 			    	MIN(
-				    		IFNULL(master_downtime.end_timestamp, '')
+				    		IFNULL(main_downtime.end_timestamp, '')
 				    	) AS downtime_end_timestamp,
 			    	MIN(
-				    		IFNULL(unix_timestamp() - unix_timestamp(master_downtime.end_timestamp), 0)
+				    		IFNULL(unix_timestamp() - unix_timestamp(main_downtime.end_timestamp), 0)
 				    	) AS downtime_remaining_seconds,
 			    	MIN(
-				    		master_instance.binlog_server
+				    		main_instance.binlog_server
 				    	) AS is_binlog_server,
 			    	MIN(
-				    		master_instance.pseudo_gtid
+				    		main_instance.pseudo_gtid
 				    	) AS is_pseudo_gtid,
 			    	MIN(
-				    		master_instance.supports_oracle_gtid
+				    		main_instance.supports_oracle_gtid
 				    	) AS supports_oracle_gtid,
 			    	SUM(
 				    		replica_instance.oracle_gtid
-				    	) AS count_oracle_gtid_slaves,
+				    	) AS count_oracle_gtid_subordinates,
 			      IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen
 	              AND replica_instance.oracle_gtid != 0),
-              0) AS count_valid_oracle_gtid_slaves,
+              0) AS count_valid_oracle_gtid_subordinates,
 			    	SUM(
 				    		replica_instance.binlog_server
-				    	) AS count_binlog_server_slaves,
+				    	) AS count_binlog_server_subordinates,
 		        IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen
                   AND replica_instance.binlog_server != 0),
-              0) AS count_valid_binlog_server_slaves,
+              0) AS count_valid_binlog_server_subordinates,
 			    	MIN(
-				    		master_instance.mariadb_gtid
+				    		main_instance.mariadb_gtid
 				    	) AS is_mariadb_gtid,
 			    	SUM(
 				    		replica_instance.mariadb_gtid
-				    	) AS count_mariadb_gtid_slaves,
+				    	) AS count_mariadb_gtid_subordinates,
 		        IFNULL(SUM(replica_instance.last_checked <= replica_instance.last_seen
                   AND replica_instance.mariadb_gtid != 0),
-              0) AS count_valid_mariadb_gtid_slaves,
+              0) AS count_valid_mariadb_gtid_subordinates,
 						IFNULL(SUM(replica_instance.log_bin
-							  AND replica_instance.log_slave_updates
+							  AND replica_instance.log_subordinate_updates
 								AND replica_instance.binlog_format = 'STATEMENT'),
-              0) AS count_statement_based_loggin_slaves,
+              0) AS count_statement_based_loggin_subordinates,
 						IFNULL(SUM(replica_instance.log_bin
-								AND replica_instance.log_slave_updates
+								AND replica_instance.log_subordinate_updates
 								AND replica_instance.binlog_format = 'MIXED'),
-              0) AS count_mixed_based_loggin_slaves,
+              0) AS count_mixed_based_loggin_subordinates,
 						IFNULL(SUM(replica_instance.log_bin
-								AND replica_instance.log_slave_updates
+								AND replica_instance.log_subordinate_updates
 								AND replica_instance.binlog_format = 'ROW'),
-              0) AS count_row_based_loggin_slaves,
+              0) AS count_row_based_loggin_subordinates,
 						IFNULL(SUM(replica_instance.sql_delay > 0),
               0) AS count_delayed_replicas,
-						IFNULL(SUM(replica_instance.slave_lag_seconds > ?),
+						IFNULL(SUM(replica_instance.subordinate_lag_seconds > ?),
               0) AS count_lagging_replicas,
 						IFNULL(MIN(replica_instance.gtid_mode), '')
               AS min_replica_gtid_mode,
@@ -199,43 +199,43 @@ func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints)
 								and ifnull(replica_downtime.end_timestamp, now()) > now()),
               0) AS count_downtimed_replicas,
 						COUNT(DISTINCT case
-								when replica_instance.log_bin AND replica_instance.log_slave_updates
+								when replica_instance.log_bin AND replica_instance.log_subordinate_updates
 								then replica_instance.major_version
 								else NULL
 							end
 						) AS count_distinct_logging_major_versions
 		    FROM
-		        database_instance master_instance
+		        database_instance main_instance
           LEFT JOIN
-		        hostname_resolve ON (master_instance.hostname = hostname_resolve.hostname)
+		        hostname_resolve ON (main_instance.hostname = hostname_resolve.hostname)
           LEFT JOIN
 		        database_instance replica_instance ON (COALESCE(hostname_resolve.resolved_hostname,
-              master_instance.hostname) = replica_instance.master_host
-							AND master_instance.port = replica_instance.master_port)
+              main_instance.hostname) = replica_instance.main_host
+							AND main_instance.port = replica_instance.main_port)
           LEFT JOIN
-		        database_instance_maintenance ON (master_instance.hostname = database_instance_maintenance.hostname
-							AND master_instance.port = database_instance_maintenance.port
+		        database_instance_maintenance ON (main_instance.hostname = database_instance_maintenance.hostname
+							AND main_instance.port = database_instance_maintenance.port
 							AND database_instance_maintenance.maintenance_active = 1)
           LEFT JOIN
-		        database_instance_downtime as master_downtime ON (master_instance.hostname = master_downtime.hostname
-							AND master_instance.port = master_downtime.port
-							AND master_downtime.downtime_active = 1)
+		        database_instance_downtime as main_downtime ON (main_instance.hostname = main_downtime.hostname
+							AND main_instance.port = main_downtime.port
+							AND main_downtime.downtime_active = 1)
 					LEFT JOIN
 		        database_instance_downtime as replica_downtime ON (replica_instance.hostname = replica_downtime.hostname
 							AND replica_instance.port = replica_downtime.port
 							AND replica_downtime.downtime_active = 1)
         	LEFT JOIN
-		        cluster_alias ON (cluster_alias.cluster_name = master_instance.cluster_name)
+		        cluster_alias ON (cluster_alias.cluster_name = main_instance.cluster_name)
 		    WHERE
 		    	database_instance_maintenance.database_instance_maintenance_id IS NULL
-		    	AND ? IN ('', master_instance.cluster_name)
+		    	AND ? IN ('', main_instance.cluster_name)
 		    GROUP BY
-			    master_instance.hostname,
-			    master_instance.port
+			    main_instance.hostname,
+			    main_instance.port
 			%s
 		    ORDER BY
-			    is_master DESC ,
-			    is_cluster_master DESC,
+			    is_main DESC ,
+			    is_cluster_main DESC,
 			    count_replicas DESC
 	`, analysisQueryReductionClause)
 	err := db.QueryOrchestrator(query, args, func(m sqlutils.RowMap) error {
@@ -245,10 +245,10 @@ func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints)
 			ProcessingNodeToken:    util.ProcessToken.Hash,
 		}
 
-		a.IsMaster = m.GetBool("is_master")
-		a.IsCoMaster = m.GetBool("is_co_master")
+		a.IsMain = m.GetBool("is_main")
+		a.IsCoMain = m.GetBool("is_co_main")
 		a.AnalyzedInstanceKey = InstanceKey{Hostname: m.GetString("hostname"), Port: m.GetInt("port")}
-		a.AnalyzedInstanceMasterKey = InstanceKey{Hostname: m.GetString("master_host"), Port: m.GetInt("master_port")}
+		a.AnalyzedInstanceMainKey = InstanceKey{Hostname: m.GetString("main_host"), Port: m.GetInt("main_port")}
 		a.AnalyzedInstanceDataCenter = m.GetString("data_center")
 		a.AnalyzedInstancePhysicalEnvironment = m.GetString("physical_environment")
 		a.ClusterDetails.ClusterName = m.GetString("cluster_name")
@@ -257,154 +257,154 @@ func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints)
 		a.LastCheckValid = m.GetBool("is_last_check_valid")
 		a.LastCheckPartialSuccess = m.GetBool("last_check_partial_success")
 		a.CountReplicas = m.GetUint("count_replicas")
-		a.CountValidReplicas = m.GetUint("count_valid_slaves")
-		a.CountValidReplicatingReplicas = m.GetUint("count_valid_replicating_slaves")
-		a.CountReplicasFailingToConnectToMaster = m.GetUint("count_replicas_failing_to_connect_to_master")
+		a.CountValidReplicas = m.GetUint("count_valid_subordinates")
+		a.CountValidReplicatingReplicas = m.GetUint("count_valid_replicating_subordinates")
+		a.CountReplicasFailingToConnectToMain = m.GetUint("count_replicas_failing_to_connect_to_main")
 		a.CountDowntimedReplicas = m.GetUint("count_downtimed_replicas")
 		a.ReplicationDepth = m.GetUint("replication_depth")
-		a.IsFailingToConnectToMaster = m.GetBool("is_failing_to_connect_to_master")
+		a.IsFailingToConnectToMain = m.GetBool("is_failing_to_connect_to_main")
 		a.IsDowntimed = m.GetBool("is_downtimed")
 		a.DowntimeEndTimestamp = m.GetString("downtime_end_timestamp")
 		a.DowntimeRemainingSeconds = m.GetInt("downtime_remaining_seconds")
 		a.IsBinlogServer = m.GetBool("is_binlog_server")
 		a.ClusterDetails.ReadRecoveryInfo()
 
-		a.SlaveHosts = *NewInstanceKeyMap()
-		a.SlaveHosts.ReadCommaDelimitedList(m.GetString("slave_hosts"))
+		a.SubordinateHosts = *NewInstanceKeyMap()
+		a.SubordinateHosts.ReadCommaDelimitedList(m.GetString("subordinate_hosts"))
 
-		countValidOracleGTIDSlaves := m.GetUint("count_valid_oracle_gtid_slaves")
-		a.OracleGTIDImmediateTopology = countValidOracleGTIDSlaves == a.CountValidReplicas && a.CountValidReplicas > 0
-		countValidMariaDBGTIDSlaves := m.GetUint("count_valid_mariadb_gtid_slaves")
-		a.MariaDBGTIDImmediateTopology = countValidMariaDBGTIDSlaves == a.CountValidReplicas && a.CountValidReplicas > 0
-		countValidBinlogServerSlaves := m.GetUint("count_valid_binlog_server_slaves")
-		a.BinlogServerImmediateTopology = countValidBinlogServerSlaves == a.CountValidReplicas && a.CountValidReplicas > 0
+		countValidOracleGTIDSubordinates := m.GetUint("count_valid_oracle_gtid_subordinates")
+		a.OracleGTIDImmediateTopology = countValidOracleGTIDSubordinates == a.CountValidReplicas && a.CountValidReplicas > 0
+		countValidMariaDBGTIDSubordinates := m.GetUint("count_valid_mariadb_gtid_subordinates")
+		a.MariaDBGTIDImmediateTopology = countValidMariaDBGTIDSubordinates == a.CountValidReplicas && a.CountValidReplicas > 0
+		countValidBinlogServerSubordinates := m.GetUint("count_valid_binlog_server_subordinates")
+		a.BinlogServerImmediateTopology = countValidBinlogServerSubordinates == a.CountValidReplicas && a.CountValidReplicas > 0
 		a.PseudoGTIDImmediateTopology = m.GetBool("is_pseudo_gtid")
 
 		a.MinReplicaGTIDMode = m.GetString("min_replica_gtid_mode")
 		a.MaxReplicaGTIDMode = m.GetString("max_replica_gtid_mode")
 		a.MaxReplicaGTIDErrant = m.GetString("max_replica_gtid_errant")
 
-		a.CountStatementBasedLoggingReplicas = m.GetUint("count_statement_based_loggin_slaves")
-		a.CountMixedBasedLoggingReplicas = m.GetUint("count_mixed_based_loggin_slaves")
-		a.CountRowBasedLoggingReplicas = m.GetUint("count_row_based_loggin_slaves")
+		a.CountStatementBasedLoggingReplicas = m.GetUint("count_statement_based_loggin_subordinates")
+		a.CountMixedBasedLoggingReplicas = m.GetUint("count_mixed_based_loggin_subordinates")
+		a.CountRowBasedLoggingReplicas = m.GetUint("count_row_based_loggin_subordinates")
 		a.CountDistinctMajorVersionsLoggingReplicas = m.GetUint("count_distinct_logging_major_versions")
 
 		a.CountDelayedReplicas = m.GetUint("count_delayed_replicas")
 		a.CountLaggingReplicas = m.GetUint("count_lagging_replicas")
 
 		if !a.LastCheckValid {
-			analysisMessage := fmt.Sprintf("analysis: IsMaster: %+v, LastCheckValid: %+v, LastCheckPartialSuccess: %+v, CountReplicas: %+v, CountValidReplicatingReplicas: %+v, CountLaggingReplicas: %+v, CountDelayedReplicas: %+v, ",
-				a.IsMaster, a.LastCheckValid, a.LastCheckPartialSuccess, a.CountReplicas, a.CountValidReplicatingReplicas, a.CountLaggingReplicas, a.CountDelayedReplicas,
+			analysisMessage := fmt.Sprintf("analysis: IsMain: %+v, LastCheckValid: %+v, LastCheckPartialSuccess: %+v, CountReplicas: %+v, CountValidReplicatingReplicas: %+v, CountLaggingReplicas: %+v, CountDelayedReplicas: %+v, ",
+				a.IsMain, a.LastCheckValid, a.LastCheckPartialSuccess, a.CountReplicas, a.CountValidReplicatingReplicas, a.CountLaggingReplicas, a.CountDelayedReplicas,
 			)
 			if util.ClearToLog("analysis_dao", analysisMessage) {
 				log.Debugf(analysisMessage)
 			}
 		}
-		if a.IsMaster && !a.LastCheckValid && a.CountReplicas == 0 {
-			a.Analysis = DeadMasterWithoutSlaves
-			a.Description = "Master cannot be reached by orchestrator and has no slave"
+		if a.IsMain && !a.LastCheckValid && a.CountReplicas == 0 {
+			a.Analysis = DeadMainWithoutSubordinates
+			a.Description = "Main cannot be reached by orchestrator and has no subordinate"
 			//
-		} else if a.IsMaster && !a.LastCheckValid && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadMaster
-			a.Description = "Master cannot be reached by orchestrator and none of its replicas is replicating"
+		} else if a.IsMain && !a.LastCheckValid && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadMain
+			a.Description = "Main cannot be reached by orchestrator and none of its replicas is replicating"
 			//
-		} else if a.IsMaster && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas == 0 && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadMasterAndSlaves
-			a.Description = "Master cannot be reached by orchestrator and none of its replicas is replicating"
+		} else if a.IsMain && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas == 0 && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadMainAndSubordinates
+			a.Description = "Main cannot be reached by orchestrator and none of its replicas is replicating"
 			//
-		} else if a.IsMaster && !a.LastCheckValid && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadMasterAndSomeSlaves
-			a.Description = "Master cannot be reached by orchestrator; some of its replicas are unreachable and none of its reachable replicas is replicating"
+		} else if a.IsMain && !a.LastCheckValid && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadMainAndSomeSubordinates
+			a.Description = "Main cannot be reached by orchestrator; some of its replicas are unreachable and none of its reachable replicas is replicating"
 			//
-		} else if a.IsMaster && !a.LastCheckValid && a.CountLaggingReplicas == a.CountReplicas && a.CountDelayedReplicas < a.CountReplicas && a.CountValidReplicatingReplicas > 0 {
-			a.Analysis = UnreachableMasterWithLaggingReplicas
-			a.Description = "Master cannot be reached by orchestrator and all of its replicas are lagging"
+		} else if a.IsMain && !a.LastCheckValid && a.CountLaggingReplicas == a.CountReplicas && a.CountDelayedReplicas < a.CountReplicas && a.CountValidReplicatingReplicas > 0 {
+			a.Analysis = UnreachableMainWithLaggingReplicas
+			a.Description = "Main cannot be reached by orchestrator and all of its replicas are lagging"
 			//
-		} else if a.IsMaster && !a.LastCheckValid && !a.LastCheckPartialSuccess && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas > 0 {
-			a.Analysis = UnreachableMaster
-			a.Description = "Master cannot be reached by orchestrator but it has replicating replicas; possibly a network/host issue"
+		} else if a.IsMain && !a.LastCheckValid && !a.LastCheckPartialSuccess && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas > 0 {
+			a.Analysis = UnreachableMain
+			a.Description = "Main cannot be reached by orchestrator but it has replicating replicas; possibly a network/host issue"
 			//
-		} else if a.IsMaster && a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = MasterSingleSlaveNotReplicating
-			a.Description = "Master is reachable but its single slave is not replicating"
+		} else if a.IsMain && a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = MainSingleSubordinateNotReplicating
+			a.Description = "Main is reachable but its single subordinate is not replicating"
 			//
-		} else if a.IsMaster && a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == 0 {
-			a.Analysis = MasterSingleSlaveDead
-			a.Description = "Master is reachable but its single slave is dead"
+		} else if a.IsMain && a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == 0 {
+			a.Analysis = MainSingleSubordinateDead
+			a.Description = "Main is reachable but its single subordinate is dead"
 			//
-		} else if a.IsMaster && a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = AllMasterSlavesNotReplicating
-			a.Description = "Master is reachable but none of its replicas is replicating"
+		} else if a.IsMain && a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = AllMainSubordinatesNotReplicating
+			a.Description = "Main is reachable but none of its replicas is replicating"
 			//
-		} else if a.IsMaster && a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = AllMasterSlavesNotReplicatingOrDead
-			a.Description = "Master is reachable but none of its replicas is replicating"
+		} else if a.IsMain && a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = AllMainSubordinatesNotReplicatingOrDead
+			a.Description = "Main is reachable but none of its replicas is replicating"
 			//
-		} else /* co-master */ if a.IsCoMaster && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadCoMaster
-			a.Description = "Co-master cannot be reached by orchestrator and none of its replicas is replicating"
+		} else /* co-main */ if a.IsCoMain && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadCoMain
+			a.Description = "Co-main cannot be reached by orchestrator and none of its replicas is replicating"
 			//
-		} else if a.IsCoMaster && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadCoMasterAndSomeSlaves
-			a.Description = "Co-master cannot be reached by orchestrator; some of its replicas are unreachable and none of its reachable replicas is replicating"
+		} else if a.IsCoMain && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadCoMainAndSomeSubordinates
+			a.Description = "Co-main cannot be reached by orchestrator; some of its replicas are unreachable and none of its reachable replicas is replicating"
 			//
-		} else if a.IsCoMaster && !a.LastCheckValid && !a.LastCheckPartialSuccess && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas > 0 {
-			a.Analysis = UnreachableCoMaster
-			a.Description = "Co-master cannot be reached by orchestrator but it has replicating replicas; possibly a network/host issue"
+		} else if a.IsCoMain && !a.LastCheckValid && !a.LastCheckPartialSuccess && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas > 0 {
+			a.Analysis = UnreachableCoMain
+			a.Description = "Co-main cannot be reached by orchestrator but it has replicating replicas; possibly a network/host issue"
 			//
-		} else if a.IsCoMaster && a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = AllCoMasterSlavesNotReplicating
-			a.Description = "Co-master is reachable but none of its replicas is replicating"
+		} else if a.IsCoMain && a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = AllCoMainSubordinatesNotReplicating
+			a.Description = "Co-main is reachable but none of its replicas is replicating"
 			//
-		} else /* intermediate-master */ if !a.IsMaster && !a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == a.CountReplicas && a.CountReplicasFailingToConnectToMaster == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadIntermediateMasterWithSingleSlaveFailingToConnect
-			a.Description = "Intermediate master cannot be reached by orchestrator and its (single) slave is failing to connect"
+		} else /* intermediate-main */ if !a.IsMain && !a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == a.CountReplicas && a.CountReplicasFailingToConnectToMain == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadIntermediateMainWithSingleSubordinateFailingToConnect
+			a.Description = "Intermediate main cannot be reached by orchestrator and its (single) subordinate is failing to connect"
 			//
-		} else /* intermediate-master */ if !a.IsMaster && !a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadIntermediateMasterWithSingleSlave
-			a.Description = "Intermediate master cannot be reached by orchestrator and its (single) slave is not replicating"
+		} else /* intermediate-main */ if !a.IsMain && !a.LastCheckValid && a.CountReplicas == 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadIntermediateMainWithSingleSubordinate
+			a.Description = "Intermediate main cannot be reached by orchestrator and its (single) subordinate is not replicating"
 			//
-		} else /* intermediate-master */ if !a.IsMaster && !a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadIntermediateMaster
-			a.Description = "Intermediate master cannot be reached by orchestrator and none of its replicas is replicating"
+		} else /* intermediate-main */ if !a.IsMain && !a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicas == a.CountReplicas && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadIntermediateMain
+			a.Description = "Intermediate main cannot be reached by orchestrator and none of its replicas is replicating"
 			//
-		} else if !a.IsMaster && !a.LastCheckValid && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = DeadIntermediateMasterAndSomeSlaves
-			a.Description = "Intermediate master cannot be reached by orchestrator; some of its replicas are unreachable and none of its reachable replicas is replicating"
+		} else if !a.IsMain && !a.LastCheckValid && a.CountValidReplicas < a.CountReplicas && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = DeadIntermediateMainAndSomeSubordinates
+			a.Description = "Intermediate main cannot be reached by orchestrator; some of its replicas are unreachable and none of its reachable replicas is replicating"
 			//
-		} else if !a.IsMaster && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas == 0 {
-			a.Analysis = DeadIntermediateMasterAndSlaves
-			a.Description = "Intermediate master cannot be reached by orchestrator and all of its replicas are unreachable"
+		} else if !a.IsMain && !a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicas == 0 {
+			a.Analysis = DeadIntermediateMainAndSubordinates
+			a.Description = "Intermediate main cannot be reached by orchestrator and all of its replicas are unreachable"
 			//
-		} else if !a.IsMaster && !a.LastCheckValid && !a.LastCheckPartialSuccess && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas > 0 {
-			a.Analysis = UnreachableIntermediateMaster
-			a.Description = "Intermediate master cannot be reached by orchestrator but it has replicating replicas; possibly a network/host issue"
+		} else if !a.IsMain && !a.LastCheckValid && !a.LastCheckPartialSuccess && a.CountValidReplicas > 0 && a.CountValidReplicatingReplicas > 0 {
+			a.Analysis = UnreachableIntermediateMain
+			a.Description = "Intermediate main cannot be reached by orchestrator but it has replicating replicas; possibly a network/host issue"
 			//
-		} else if !a.IsMaster && a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicatingReplicas == 0 &&
-			a.CountReplicasFailingToConnectToMaster > 0 && a.CountReplicasFailingToConnectToMaster == a.CountValidReplicas {
-			// All replicas are either failing to connect to master (and at least one of these have to exist)
+		} else if !a.IsMain && a.LastCheckValid && a.CountReplicas > 1 && a.CountValidReplicatingReplicas == 0 &&
+			a.CountReplicasFailingToConnectToMain > 0 && a.CountReplicasFailingToConnectToMain == a.CountValidReplicas {
+			// All replicas are either failing to connect to main (and at least one of these have to exist)
 			// or completely dead.
-			// Must have at least two replicas to reach such conclusion -- do note that the intermediate master is still
+			// Must have at least two replicas to reach such conclusion -- do note that the intermediate main is still
 			// reachable to orchestrator, so we base our conclusion on replicas only at this point.
-			a.Analysis = AllIntermediateMasterSlavesFailingToConnectOrDead
-			a.Description = "Intermediate master is reachable but all of its replicas are failing to connect"
+			a.Analysis = AllIntermediateMainSubordinatesFailingToConnectOrDead
+			a.Description = "Intermediate main is reachable but all of its replicas are failing to connect"
 			//
-		} else if !a.IsMaster && a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
-			a.Analysis = AllIntermediateMasterSlavesNotReplicating
-			a.Description = "Intermediate master is reachable but none of its replicas is replicating"
+		} else if !a.IsMain && a.LastCheckValid && a.CountReplicas > 0 && a.CountValidReplicatingReplicas == 0 {
+			a.Analysis = AllIntermediateMainSubordinatesNotReplicating
+			a.Description = "Intermediate main is reachable but none of its replicas is replicating"
 			//
-		} else if a.IsBinlogServer && a.IsFailingToConnectToMaster {
-			a.Analysis = BinlogServerFailingToConnectToMaster
-			a.Description = "Binlog server is unable to connect to its master"
+		} else if a.IsBinlogServer && a.IsFailingToConnectToMain {
+			a.Analysis = BinlogServerFailingToConnectToMain
+			a.Description = "Binlog server is unable to connect to its main"
 			//
-		} else if a.ReplicationDepth == 1 && a.IsFailingToConnectToMaster {
-			a.Analysis = FirstTierSlaveFailingToConnectToMaster
-			a.Description = "1st tier slave (directly replicating from topology master) is unable to connect to the master"
+		} else if a.ReplicationDepth == 1 && a.IsFailingToConnectToMain {
+			a.Analysis = FirstTierSubordinateFailingToConnectToMain
+			a.Description = "1st tier subordinate (directly replicating from topology main) is unable to connect to the main"
 			//
 		}
-		//		 else if a.IsMaster && a.CountReplicas == 0 {
-		//			a.Analysis = MasterWithoutSlaves
-		//			a.Description = "Master has no replicas"
+		//		 else if a.IsMain && a.CountReplicas == 0 {
+		//			a.Analysis = MainWithoutSubordinates
+		//			a.Description = "Main has no replicas"
 		//		}
 
 		appendAnalysis := func(analysis *ReplicationAnalysis) {
@@ -421,16 +421,16 @@ func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints)
 			}
 			if a.CountReplicas == a.CountDowntimedReplicas {
 				switch a.Analysis {
-				case AllMasterSlavesNotReplicating,
-					AllMasterSlavesNotReplicatingOrDead,
-					MasterSingleSlaveDead,
-					AllCoMasterSlavesNotReplicating,
-					DeadIntermediateMasterWithSingleSlave,
-					DeadIntermediateMasterWithSingleSlaveFailingToConnect,
-					DeadIntermediateMasterAndSlaves,
-					DeadIntermediateMasterAndSomeSlaves,
-					AllIntermediateMasterSlavesFailingToConnectOrDead,
-					AllIntermediateMasterSlavesNotReplicating:
+				case AllMainSubordinatesNotReplicating,
+					AllMainSubordinatesNotReplicatingOrDead,
+					MainSingleSubordinateDead,
+					AllCoMainSubordinatesNotReplicating,
+					DeadIntermediateMainWithSingleSubordinate,
+					DeadIntermediateMainWithSingleSubordinateFailingToConnect,
+					DeadIntermediateMainAndSubordinates,
+					DeadIntermediateMainAndSomeSubordinates,
+					AllIntermediateMainSubordinatesFailingToConnectOrDead,
+					AllIntermediateMainSubordinatesNotReplicating:
 					a.IsReplicasDowntimed = true
 					a.SkippableDueToDowntime = true
 				}
@@ -444,17 +444,17 @@ func GetReplicationAnalysis(clusterName string, hints *ReplicationAnalysisHints)
 		{
 			// Moving on to structure analysis
 			// We also do structural checks. See if there's potential danger in promotions
-			if a.IsMaster && a.CountStatementBasedLoggingReplicas > 0 && a.CountMixedBasedLoggingReplicas > 0 {
-				a.StructureAnalysis = append(a.StructureAnalysis, StatementAndMixedLoggingSlavesStructureWarning)
+			if a.IsMain && a.CountStatementBasedLoggingReplicas > 0 && a.CountMixedBasedLoggingReplicas > 0 {
+				a.StructureAnalysis = append(a.StructureAnalysis, StatementAndMixedLoggingSubordinatesStructureWarning)
 			}
-			if a.IsMaster && a.CountStatementBasedLoggingReplicas > 0 && a.CountRowBasedLoggingReplicas > 0 {
-				a.StructureAnalysis = append(a.StructureAnalysis, StatementAndRowLoggingSlavesStructureWarning)
+			if a.IsMain && a.CountStatementBasedLoggingReplicas > 0 && a.CountRowBasedLoggingReplicas > 0 {
+				a.StructureAnalysis = append(a.StructureAnalysis, StatementAndRowLoggingSubordinatesStructureWarning)
 			}
-			if a.IsMaster && a.CountMixedBasedLoggingReplicas > 0 && a.CountRowBasedLoggingReplicas > 0 {
-				a.StructureAnalysis = append(a.StructureAnalysis, MixedAndRowLoggingSlavesStructureWarning)
+			if a.IsMain && a.CountMixedBasedLoggingReplicas > 0 && a.CountRowBasedLoggingReplicas > 0 {
+				a.StructureAnalysis = append(a.StructureAnalysis, MixedAndRowLoggingSubordinatesStructureWarning)
 			}
-			if a.IsMaster && a.CountDistinctMajorVersionsLoggingReplicas > 1 {
-				a.StructureAnalysis = append(a.StructureAnalysis, MultipleMajorVersionsLoggingSlaves)
+			if a.IsMain && a.CountDistinctMajorVersionsLoggingReplicas > 1 {
+				a.StructureAnalysis = append(a.StructureAnalysis, MultipleMajorVersionsLoggingSubordinates)
 			}
 
 			if a.CountReplicas > 0 && (a.GTIDMode != a.MinReplicaGTIDMode || a.GTIDMode != a.MaxReplicaGTIDMode) {
