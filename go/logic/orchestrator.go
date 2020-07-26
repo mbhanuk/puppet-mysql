@@ -183,7 +183,7 @@ func handleDiscoveryRequests() {
 }
 
 // DiscoverInstance will attempt to discover (poll) an instance (unless
-// it is already up to date) and will also ensure that its master and
+// it is already up to date) and will also ensure that its main and
 // replicas (if any) are also checked.
 func DiscoverInstance(instanceKey inst.InstanceKey) {
 	if inst.InstanceIsForgotten(&instanceKey) {
@@ -275,7 +275,7 @@ func DiscoverInstance(instanceKey inst.InstanceKey) {
 	}
 
 	// Investigate replicas:
-	for _, replicaKey := range instance.SlaveHosts.GetInstanceKeys() {
+	for _, replicaKey := range instance.SubordinateHosts.GetInstanceKeys() {
 		replicaKey := replicaKey // not needed? no concurrency here?
 
 		// Avoid noticing some hosts we would otherwise discover
@@ -287,9 +287,9 @@ func DiscoverInstance(instanceKey inst.InstanceKey) {
 			discoveryQueue.Push(replicaKey)
 		}
 	}
-	// Investigate master:
-	if instance.MasterKey.IsValid() {
-		discoveryQueue.Push(instance.MasterKey)
+	// Investigate main:
+	if instance.MainKey.IsValid() {
+		discoveryQueue.Push(instance.MainKey)
 	}
 }
 
@@ -364,11 +364,11 @@ func onHealthTick() {
 	}
 }
 
-// publishDiscoverMasters will publish to raft a discovery request for all known masters.
+// publishDiscoverMains will publish to raft a discovery request for all known mains.
 // This makes for a best-effort keep-in-sync between raft nodes, where some may have
 // inconsistent data due to hosts being forgotten, for example.
-func publishDiscoverMasters() error {
-	instances, err := inst.ReadWriteableClustersMasters()
+func publishDiscoverMains() error {
+	instances, err := inst.ReadWriteableClustersMains()
 	if err == nil {
 		for _, instance := range instances {
 			key := instance.Key
@@ -381,7 +381,7 @@ func publishDiscoverMasters() error {
 // InjectPseudoGTIDOnWriters will inject a PseudoGTID entry on all writable, accessible,
 // supported writers.
 func InjectPseudoGTIDOnWriters() error {
-	instances, err := inst.ReadWriteableClustersMasters()
+	instances, err := inst.ReadWriteableClustersMains()
 	if err != nil {
 		return log.Errore(err)
 	}
@@ -406,12 +406,12 @@ func InjectPseudoGTIDOnWriters() error {
 	return nil
 }
 
-// Write a cluster's master (or all clusters masters) to kv stores.
+// Write a cluster's main (or all clusters mains) to kv stores.
 // This should generally only happen once in a lifetime of a cluster. Otherwise KV
 // stores are updated via failovers.
-func SubmitMastersToKvStores(clusterName string, force bool) (kvPairs [](*kv.KVPair), submittedCount int, err error) {
-	kvPairs, err = inst.GetMastersKVPairs(clusterName)
-	log.Debugf("kv.SubmitMastersToKvStores, clusterName: %s, force: %+v: numPairs: %+v", clusterName, force, len(kvPairs))
+func SubmitMainsToKvStores(clusterName string, force bool) (kvPairs [](*kv.KVPair), submittedCount int, err error) {
+	kvPairs, err = inst.GetMainsKVPairs(clusterName)
+	log.Debugf("kv.SubmitMainsToKvStores, clusterName: %s, force: %+v: numPairs: %+v", clusterName, force, len(kvPairs))
 	if err != nil {
 		return kvPairs, submittedCount, log.Errore(err)
 	}
@@ -434,7 +434,7 @@ func SubmitMastersToKvStores(clusterName string, force bool) (kvPairs [](*kv.KVP
 		}
 		submitKvPairs = append(submitKvPairs, kvPair)
 	}
-	log.Debugf("kv.SubmitMastersToKvStores: submitKvPairs: %+v", len(submitKvPairs))
+	log.Debugf("kv.SubmitMainsToKvStores: submitKvPairs: %+v", len(submitKvPairs))
 	for _, kvPair := range submitKvPairs {
 		if orcraft.IsRaftEnabled() {
 			_, err = orcraft.PublishCommand("put-key-value", kvPair)
@@ -523,19 +523,19 @@ func ContinuousDiscovery() {
 				if IsLeaderOrActive() {
 					go inst.RecordInstanceCoordinatesHistory()
 					go inst.ReviewUnseenInstances()
-					go inst.InjectUnseenMasters()
+					go inst.InjectUnseenMains()
 
 					go inst.ForgetLongUnseenInstances()
 					go inst.ForgetUnseenInstancesDifferentlyResolved()
 					go inst.ForgetExpiredHostnameResolves()
 					go inst.DeleteInvalidHostnameResolves()
-					go inst.ResolveUnknownMasterHostnameResolves()
+					go inst.ResolveUnknownMainHostnameResolves()
 					go inst.ExpireMaintenance()
 					go inst.ExpireCandidateInstances()
 					go inst.ExpireHostnameUnresolve()
 					go inst.ExpireClusterDomainName()
 					go inst.ExpireAudit()
-					go inst.ExpireMasterPositionEquivalence()
+					go inst.ExpireMainPositionEquivalence()
 					go inst.ExpirePoolInstances()
 					go inst.FlushNontrivialResolveCacheToDatabase()
 					go inst.ExpireInjectedPseudoGTID()
@@ -547,7 +547,7 @@ func ContinuousDiscovery() {
 					go ExpireTopologyRecoveryStepsHistory()
 
 					if runCheckAndRecoverOperationsTimeRipe() && IsLeader() {
-						go SubmitMastersToKvStores("", false)
+						go SubmitMainsToKvStores("", false)
 					}
 				} else {
 					// Take this opportunity to refresh yourself
@@ -556,7 +556,7 @@ func ContinuousDiscovery() {
 			}()
 		case <-raftCaretakingTick:
 			if orcraft.IsRaftEnabled() && orcraft.IsLeader() {
-				go publishDiscoverMasters()
+				go publishDiscoverMains()
 			}
 		case <-recoveryTick:
 			go func() {
